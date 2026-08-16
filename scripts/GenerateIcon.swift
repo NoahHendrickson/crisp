@@ -2,7 +2,8 @@
 // diagonal gradient (the thing Crisp exists to preserve), with the re-drawn
 // cursor arrow and a click ripple.
 //
-// Usage: swift scripts/GenerateIcon.swift <output.iconset dir>
+// Usage: swift scripts/GenerateIcon.swift <output.iconset dir> [dev]
+//        ("dev" switches the gradient to orange so the dev build is unmistakable)
 // Then:  iconutil -c icns <output.iconset>
 
 import Foundation
@@ -11,11 +12,12 @@ import ImageIO
 import UniformTypeIdentifiers
 
 let args = CommandLine.arguments
-guard args.count == 2 else {
-    FileHandle.standardError.write(Data("usage: GenerateIcon.swift <out.iconset>\n".utf8))
+guard args.count >= 2 else {
+    FileHandle.standardError.write(Data("usage: GenerateIcon.swift <out.iconset> [dev]\n".utf8))
     exit(1)
 }
 let outDir = URL(fileURLWithPath: args[1], isDirectory: true)
+let isDev = args.count > 2 && args[2] == "dev"
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
 func drawIcon(canvas: Int) -> CGImage? {
@@ -36,14 +38,22 @@ func drawIcon(canvas: Int) -> CGImage? {
     ctx.addPath(squircle)
     ctx.clip()
 
-    // The gradient — deep indigo to teal, diagonal, dead smooth.
-    let gradient = CGGradient(
-        colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-        colors: [
+    // The gradient — diagonal, dead smooth. Release: deep indigo → teal.
+    // Dev: burnt orange → amber, so the two builds are unmistakable.
+    let colors: [CGColor] = isDev
+        ? [
+            CGColor(srgbRed: 0.45, green: 0.12, blue: 0.02, alpha: 1),
+            CGColor(srgbRed: 0.85, green: 0.38, blue: 0.05, alpha: 1),
+            CGColor(srgbRed: 0.98, green: 0.65, blue: 0.12, alpha: 1),
+        ]
+        : [
             CGColor(srgbRed: 0.10, green: 0.08, blue: 0.35, alpha: 1),
             CGColor(srgbRed: 0.12, green: 0.35, blue: 0.66, alpha: 1),
             CGColor(srgbRed: 0.15, green: 0.65, blue: 0.68, alpha: 1),
-        ] as CFArray,
+        ]
+    let gradient = CGGradient(
+        colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+        colors: colors as CFArray,
         locations: [0, 0.55, 1]
     )!
     ctx.drawLinearGradient(

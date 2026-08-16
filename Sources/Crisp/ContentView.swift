@@ -21,11 +21,26 @@ struct ContentView: View {
         .onAppear { model.refresh() }
     }
 
+    /// True in the Crisp Dev build (separate bundle id) — shown in orange so
+    /// the two side-by-side builds are unmistakable.
+    private var isDevBuild: Bool {
+        Bundle.main.bundleIdentifier?.hasSuffix(".dev") ?? true
+    }
+
     private var recorderPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Crisp")
+                Text(isDevBuild ? "Crisp Dev" : "Crisp")
                     .font(.title2.bold())
+                    .foregroundStyle(isDevBuild ? Color.orange : Color.primary)
+                if isDevBuild {
+                    Text("DEV BUILD")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
                 if case .recording(let start) = model.state {
                     RecordingTimer(start: start)

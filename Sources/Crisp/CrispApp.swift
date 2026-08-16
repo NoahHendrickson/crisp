@@ -39,8 +39,12 @@ struct CrispApp: App {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    private var appTitle: String {
+        (Bundle.main.bundleIdentifier?.hasSuffix(".dev") ?? true) ? "Crisp Dev" : "Crisp"
+    }
+
     var body: some Scene {
-        Window("Crisp", id: "main") {
+        Window(appTitle, id: "main") {
             ContentView()
                 .environmentObject(model)
         }

@@ -16,9 +16,11 @@ VERSION="0.1.0"
 if [[ "${1:-}" == "--release" ]]; then
     APP_NAME="Crisp"
     BUNDLE_ID="com.noey.crisp"
+    ICON="assets/AppIcon.icns"
 else
     APP_NAME="Crisp Dev"
     BUNDLE_ID="com.noey.crisp.dev"
+    ICON="assets/AppIcon-Dev.icns"
 fi
 
 swift build -c release
@@ -28,8 +30,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/Crisp "$APP/Contents/MacOS/Crisp"
-if [[ -f assets/AppIcon.icns ]]; then
-    cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+if [[ -f "$ICON" ]]; then
+    cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
