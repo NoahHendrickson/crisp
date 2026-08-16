@@ -92,6 +92,28 @@ enum SelfTest {
             throw SelfTestError.badDuration(planDuration)
         }
         print("selftest: edited-plan export ok — \(String(format: "%.2f", planDuration))s")
+
+        // Optional online leg: exercise the real AI-polish loop (spends a small
+        // amount of the user's agent-CLI quota, so only on request).
+        if ProcessInfo.processInfo.environment["CRISP_AI_SELFTEST"] == "1" {
+            let providers = await AIDirector.detectProviders()
+            guard let provider = providers.first(where: { $0.kind == .claude }) ?? providers.first else {
+                throw SelfTestError.noAIProvider
+            }
+            print("selftest: AI polish via \(provider.kind.rawValue)…")
+            let meta = try recording.loadMeta()
+            let planner = ZoomPlanner(width: Double(width), height: Double(height))
+            let auto = planner.segments(events: meta.events, duration: duration)
+            let polished = try await AIDirector.polish(
+                recording: recording, meta: meta, duration: duration,
+                segments: auto, note: "test run — keep it minimal", provider: provider
+            )
+            print("selftest: AI polish ok — \(auto.count) → \(polished.count) segments")
+            for seg in polished {
+                print(String(format: "  zoom %.2f–%.2fs @%.1fx center(%.0f,%.0f) pans:%d",
+                             seg.start, seg.end, seg.zoom, seg.cx, seg.cy, seg.pans.count))
+            }
+        }
     }
 
     /// A moving box over a slow diagonal gradient — the gradient is exactly the
@@ -207,5 +229,6 @@ enum SelfTest {
         case noTrack
         case badDuration(Double)
         case badSize(CGSize)
+        case noAIProvider
     }
 }

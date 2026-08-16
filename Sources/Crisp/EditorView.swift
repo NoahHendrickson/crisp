@@ -63,6 +63,13 @@ struct EditorView: View {
     @State private var loadError: String?
     @State private var rebuildTask: Task<Void, Never>?
 
+    @State private var aiProviders: [AIProvider] = []
+    @State private var aiProvider: AIProvider?
+    @State private var aiNote = ""
+    @State private var aiRunning = false
+    @State private var aiStatus: String?
+    @State private var aiBackup: [ZoomSegment]?
+
     private var recording: Recording { Recording(folder: folder) }
 
     var body: some View {
@@ -79,6 +86,7 @@ struct EditorView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     timeline
                     inspector
+                    aiRow
                     controls
                 }
                 .padding(14)
@@ -86,7 +94,13 @@ struct EditorView: View {
         }
         .frame(minWidth: 880, minHeight: 660)
         .navigationTitle("Zoom Editor — \(recording.name)")
-        .onAppear(perform: load)
+        .onAppear {
+            load()
+            Task {
+                aiProviders = await AIDirector.detectProviders()
+                aiProvider = aiProviders.first
+            }
+        }
         .onDisappear {
             if let timeObserver { player.removeTimeObserver(timeObserver) }
             timeObserver = nil
@@ -483,6 +497,83 @@ struct EditorView: View {
     }
 
     // MARK: - Controls
+
+    // MARK: - AI polish
+
+    /// Provider row: hand the current plan to Claude Code or Codex (using the
+    /// user's existing CLI sign-in / subscription) for editorial touch-up.
+    @ViewBuilder
+    private var aiRow: some View {
+        if !aiProviders.isEmpty {
+            HStack(spacing: 10) {
+                Image(systemName: "wand.and.stars")
+                    .foregroundStyle(.secondary)
+                TextField("Director's note (optional) — e.g. “calmer, only zoom on the form”", text: $aiNote)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(aiRunning)
+                Picker("", selection: $aiProvider) {
+                    ForEach(aiProviders) { provider in
+                        Text(provider.kind.rawValue).tag(Optional(provider))
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(aiRunning)
+                if aiRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Polishing…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("AI Polish") { runAIPolish() }
+                        .disabled(aiProvider == nil || segments.isEmpty)
+                        .help("Send the click log, current plan, and video frames to the selected agent for timing/framing touch-up (~10–60s)")
+                    if aiBackup != nil {
+                        Button("Undo AI") {
+                            if let backup = aiBackup {
+                                segments = backup
+                                aiBackup = nil
+                                aiStatus = nil
+                                selection = nil
+                            }
+                        }
+                    }
+                }
+            }
+            if let aiStatus {
+                Text(aiStatus)
+                    .font(.caption)
+                    .foregroundStyle(aiStatus.hasPrefix("AI") ? .green : .orange)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func runAIPolish() {
+        guard let provider = aiProvider, let meta, !aiRunning else { return }
+        aiRunning = true
+        aiStatus = nil
+        let current = segments
+        let dur = duration
+        let note = aiNote
+        let rec = recording
+        Task {
+            do {
+                let polished = try await AIDirector.polish(
+                    recording: rec, meta: meta, duration: dur,
+                    segments: current, note: note, provider: provider
+                )
+                aiBackup = current
+                segments = polished
+                selection = nil
+                aiStatus = "AI polished: \(current.count) → \(polished.count) zooms. Review the preview — Undo AI restores your previous plan."
+            } catch {
+                aiStatus = error.localizedDescription
+            }
+            aiRunning = false
+        }
+    }
 
     private var isPlaying: Bool {
         player.timeControlStatus == .playing
