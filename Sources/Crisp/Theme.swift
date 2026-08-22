@@ -626,24 +626,19 @@ struct ExportProgressControls: View {
 
 /// Paints the titlebar with the theme background so the window reads as one
 /// surface, like the Figma frame.
+///
+/// Applied once, when the view lands in its window. The background is a
+/// dynamic NSColor and the window inherits `NSApp.appearance`, so light/dark
+/// switches need no re-apply here.
 struct WindowChrome: NSViewRepresentable {
-    @Environment(\.colorScheme) private var colorScheme
+    func makeNSView(context: Context) -> NSView { ChromeView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async { apply(view) }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        apply(nsView)
-    }
-
-    private func apply(_ view: NSView) {
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
+    private final class ChromeView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
             window.titlebarAppearsTransparent = true
-            window.appearance = NSApp.appearance
             window.backgroundColor = Theme.backgroundNSColor
         }
     }
