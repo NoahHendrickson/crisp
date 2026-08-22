@@ -132,6 +132,7 @@ enum AIDirector {
                 } catch {
                     failure = error
                 }
+                if Task.isCancelled { throw CancellationError() }
                 if failure == nil, let errorMessage {
                     failure = DirectorError.cliFailed(errorMessage)
                 }
@@ -492,6 +493,9 @@ enum AIDirector {
             !(key == "CLAUDECODE" || key == "CLAUDE_PID" || key.hasPrefix("CLAUDE_CODE_"))
         }
 
+        let queue = DispatchQueue(label: "crisp.ai.pipe")
+        var cancelled = false   // set from onCancel, read in finish(); both on `queue`
+
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let stdout = Pipe()
@@ -499,7 +503,6 @@ enum AIDirector {
                 process.standardOutput = stdout
                 process.standardError = stderr
 
-                let queue = DispatchQueue(label: "crisp.ai.pipe")
                 var outData = Data()           // only filled when onLine == nil
                 var errData = Data()
                 var lineBuffer = Data()
@@ -516,7 +519,8 @@ enum AIDirector {
                     }
                     stdout.fileHandleForReading.readabilityHandler = nil
                     stderr.fileHandleForReading.readabilityHandler = nil
-                    if Task.isCancelled {
+                    // Not Task.isCancelled: finish() runs on the pipe queue, outside the task.
+                    if cancelled {
                         continuation.resume(throwing: CancellationError())
                     } else if timedOut {
                         continuation.resume(throwing: DirectorError.timedOut)
@@ -594,6 +598,7 @@ enum AIDirector {
                 }
             }
         } onCancel: {
+            queue.async { cancelled = true }
             if process.isRunning { process.terminate() }
         }
     }

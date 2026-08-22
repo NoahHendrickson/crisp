@@ -37,6 +37,9 @@ final class AIChat: ObservableObject {
 
     private var session: AIDirector.Session?
     private var turn: Task<Void, Never>?
+    /// Identity of the turn that owns `running`; a cancelled turn's tail
+    /// must not reset state that a newer turn has since taken over.
+    private var turnID = UUID()
 
     func detectProviders() async {
         providers = await AIDirector.detectProviders()
@@ -70,6 +73,8 @@ final class AIChat: ObservableObject {
         let reply = AIMessage(role: .assistant, text: "")
         messages.append(reply)
         running = true
+        let myTurn = UUID()
+        turnID = myTurn
 
         turn = Task {
             // Events are yielded from the pipe thread into an ordered stream and
@@ -87,7 +92,9 @@ final class AIChat: ObservableObject {
             for await event in events {
                 absorb(event, into: reply.id)
             }
-            switch await outcome {
+            let result = await outcome
+            guard turnID == myTurn else { return }   // superseded by clear()/a newer turn
+            switch result {
             case .success(let plan):
                 update(reply.id) {
                     $0.before = segments
@@ -109,6 +116,7 @@ final class AIChat: ObservableObject {
     func clear() {
         turn?.cancel()
         turn = nil
+        turnID = UUID()
         running = false
         messages.removeAll()
         session = nil
