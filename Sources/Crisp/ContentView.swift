@@ -497,23 +497,9 @@ private struct RecordingRow: View {
             Spacer()
 
             if let fraction = model.exportProgress[recording.folder] {
-                HStack(spacing: 8) {
-                    ThemedProgress(fraction: fraction)
-                    Text("\(Int(fraction * 100))%")
-                        .font(Theme.font(11, .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.foreground)
-                        .frame(width: 28)
-                    Button {
-                        model.cancelExport(recording)
-                    } label: {
-                        Icon(name: "stop-fill", size: 16, fallback: "stop.fill")
-                            .foregroundStyle(Theme.destructive)
-                    }
-                    .buttonStyle(.themed(.outline, size: .sm, iconOnly: true))
-                    .help("Cancel export")
+                ExportProgressControls(fraction: fraction, width: 299) {
+                    model.cancelExport(recording)
                 }
-                .frame(width: 299)
             } else {
                 Button("Edit zooms") {
                     openWindow(value: recording.folder)

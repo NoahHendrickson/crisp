@@ -589,6 +589,32 @@ struct ThemedProgress: View {
     }
 }
 
+/// Progress bar + percentage + cancel button shown while an export runs.
+/// Shared by the recordings list and the editor toolbar.
+struct ExportProgressControls: View {
+    var fraction: Double
+    var onCancel: () -> Void
+    var width: CGFloat? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ThemedProgress(fraction: fraction)
+            Text("\(Int(fraction * 100))%")
+                .font(Theme.font(11, .medium))
+                .monospacedDigit()
+                .foregroundStyle(Theme.foreground)
+                .frame(width: 28)
+            Button(action: onCancel) {
+                Icon(name: "stop-fill", size: 16, fallback: "stop.fill")
+                    .foregroundStyle(Theme.destructive)
+            }
+            .buttonStyle(.themed(.outline, size: .sm, iconOnly: true))
+            .help("Cancel export")
+        }
+        .frame(width: width)
+    }
+}
+
 // MARK: - Window chrome
 
 /// Paints the titlebar with the theme background so the window reads as one

@@ -619,19 +619,9 @@ struct EditorView: View {
             .help("Discard edits and regenerate zooms from the click log")
             Spacer()
             if let fraction = model.exportProgress[folder] {
-                ThemedProgress(fraction: fraction)
-                    .frame(width: 208)
-                Text("\(Int(fraction * 100))%")
-                    .font(Theme.font(11, .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.foreground)
-                Button {
+                ExportProgressControls(fraction: fraction, width: 280) {
                     model.cancelExport(recording)
-                } label: {
-                    Icon(name: "x", size: 12, fallback: "xmark")
                 }
-                .buttonStyle(.themed(.outline, size: .xs, iconOnly: true))
-                .help("Cancel export")
             } else {
                 Button("Export with Zooms") {
                     recording.savePlan(segments)
