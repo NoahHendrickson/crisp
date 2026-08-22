@@ -34,6 +34,7 @@ struct CrispApp: App {
     @StateObject private var model = AppModel.shared
 
     init() {
+        Theme.registerFonts()
         // When run as a bare executable (swift run), behave like a regular app.
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -47,6 +48,7 @@ struct CrispApp: App {
         Window(appTitle, id: "main") {
             ContentView()
                 .environmentObject(model)
+                .themedAppearance()
         }
         .windowResizability(.contentSize)
 
@@ -54,6 +56,7 @@ struct CrispApp: App {
             if let folder {
                 EditorView(folder: folder)
                     .environmentObject(model)
+                    .themedAppearance()
             }
         }
     }

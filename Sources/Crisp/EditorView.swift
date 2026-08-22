@@ -92,7 +92,12 @@ struct EditorView: View {
                 .padding(14)
             }
         }
+        .font(Theme.font(14))
+        .foregroundStyle(Theme.foreground)
+        .groupBoxStyle(.card)
         .frame(minWidth: 880, minHeight: 660)
+        .background(Theme.background)
+        .background(WindowChrome())
         .navigationTitle("Zoom Editor — \(recording.name)")
         .onAppear {
             load()
@@ -142,9 +147,7 @@ struct EditorView: View {
 
     private func planner() -> ZoomPlanner {
         guard let meta else { return ZoomPlanner(width: 1, height: 1) }
-        var p = ZoomPlanner(width: Double(meta.pixelWidth), height: Double(meta.pixelHeight))
-        p.config = ZoomPlanner.Config.fromUserDefaults()
-        return p
+        return ZoomPlanner(width: Double(meta.pixelWidth), height: Double(meta.pixelHeight))
     }
 
     private func autoSegments() -> [ZoomSegment] {
@@ -191,13 +194,13 @@ struct EditorView: View {
                 let w = geo.size.width
                 ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(.quaternary)
+                        .fill(Theme.tabsTrack)
                         .frame(height: 30)
                     ForEach(segments) { seg in
                         RoundedRectangle(cornerRadius: 3)
                             .fill(isHighlighted(seg)
-                                  ? Color.accentColor
-                                  : Color.accentColor.opacity(0.45))
+                                  ? Theme.primary
+                                  : Theme.primary.opacity(0.45))
                             .frame(
                                 width: max(6, (seg.end - seg.start) / duration * w),
                                 height: 30
@@ -212,11 +215,12 @@ struct EditorView: View {
                         }
                     }
                     Rectangle()
-                        .fill(.red)
+                        .fill(Theme.destructive)
                         .frame(width: 2, height: 38)
                         .offset(x: min(max(0, currentTime / duration * w), w - 2), y: -4)
                 }
                 .contentShape(Rectangle())
+                .pointingHandCursor()
                 .gesture(
                     DragGesture(minimumDistance: 0).onChanged { value in
                         let t = min(max(0, value.location.x / w * duration), duration)
@@ -281,9 +285,10 @@ struct EditorView: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                .foregroundStyle(selected ? Theme.primary : Theme.mutedForeground)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .offset(x: x)
         .help(systemImage.hasPrefix("plus") ? "Zoom start — click to edit" : "Pan start — click to edit")
     }
@@ -381,15 +386,18 @@ struct EditorView: View {
                         seek(to: max(0, seg.start - 1.2))
                         player.play()
                     }
+                    .buttonStyle(.themed(.outline, size: .sm))
                     Button("Add Pan at Playhead") {
                         addPanAtPlayhead(segIndex: index)
                     }
+                    .buttonStyle(.themed(.outline, size: .sm))
                     .help("Insert a camera pan inside this zoom at the current playhead")
                     Spacer()
                     Button("Remove Zoom", role: .destructive) {
                         segments.remove(at: index)
                         selection = nil
                     }
+                    .buttonStyle(.themed(.destructive, size: .sm))
                 }
                 .padding(.top, 4)
             } label: {
@@ -468,11 +476,13 @@ struct EditorView: View {
                     seek(to: max(0, pan.t - 1.0))
                     player.play()
                 }
+                .buttonStyle(.themed(.outline, size: .sm))
                 Spacer()
                 Button("Remove Pan", role: .destructive) {
                     segments[segIndex].pans.remove(at: panIndex)
                     selection = .segment(seg.id)
                 }
+                .buttonStyle(.themed(.destructive, size: .sm))
             }
             .padding(.top, 4)
         } label: {
@@ -527,6 +537,7 @@ struct EditorView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     Button("AI Polish") { runAIPolish() }
+                        .buttonStyle(.themed(.outline))
                         .disabled(aiProvider == nil || segments.isEmpty)
                         .help("Send the click log, current plan, and video frames to the selected agent for timing/framing touch-up (~10–60s)")
                     if aiBackup != nil {
@@ -538,13 +549,14 @@ struct EditorView: View {
                                 selection = nil
                             }
                         }
+                        .buttonStyle(.themed(.ghost))
                     }
                 }
             }
             if let aiStatus {
                 Text(aiStatus)
                     .font(.caption)
-                    .foregroundStyle(aiStatus.hasPrefix("AI") ? .green : .orange)
+                    .foregroundStyle(aiStatus.hasPrefix("AI") ? Theme.success : Theme.primary)
                     .textSelection(.enabled)
             }
         }
@@ -590,32 +602,42 @@ struct EditorView: View {
                 }
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .frame(minWidth: 28)
             }
+            .buttonStyle(.themed(.outline, iconOnly: true))
             .keyboardShortcut(.space, modifiers: [])
             .help("Play / pause (Space)")
             Button("Add Zoom at Playhead") {
                 addZoomAtPlayhead()
             }
+            .buttonStyle(.themed(.outline))
             Button("Revert to Auto") {
                 try? FileManager.default.removeItem(at: recording.planURL)
                 segments = autoSegments()
                 selection = nil
             }
+            .buttonStyle(.themed(.ghost))
             .help("Discard edits and regenerate zooms from the click log")
             Spacer()
             if let fraction = model.exportProgress[folder] {
-                ProgressView(value: fraction)
-                    .frame(width: 140)
+                ThemedProgress(fraction: fraction)
+                    .frame(width: 208)
                 Text("\(Int(fraction * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(Theme.font(11, .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.foreground)
+                Button {
+                    model.cancelExport(recording)
+                } label: {
+                    Icon(name: "x", size: 12, fallback: "xmark")
+                }
+                .buttonStyle(.themed(.outline, size: .xs, iconOnly: true))
+                .help("Cancel export")
             } else {
                 Button("Export with Zooms") {
                     recording.savePlan(segments)
                     model.export(recording)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.themed(.primary))
             }
         }
     }
@@ -626,7 +648,7 @@ struct EditorView: View {
         let end = min(start + 2.0, duration)
         // Center on wherever the cursor was at this moment, if we know.
         let p = FrameComposer.cursorPosition(samples: meta.samples, at: start)
-        let config = ZoomPlanner.Config.fromUserDefaults()
+        let config = ZoomPlanner.Config()
         let segment = ZoomSegment(
             start: start,
             end: end,
