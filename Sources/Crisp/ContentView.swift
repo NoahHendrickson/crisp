@@ -486,7 +486,7 @@ private struct RecordingRow: View {
                 Text(recording.name)
                     .font(Theme.font(16))
                     .monospacedDigit()
-                if recording.hasExport || model.exportProgress[recording.folder] != nil {
+                if recording.hasExport && model.exportProgress[recording.folder] == nil {
                     Text("Exported with zooms")
                         .font(Theme.font(12, .medium))
                         .foregroundStyle(Theme.primary)
