@@ -257,6 +257,23 @@ struct GlossOverlay<S: InsettableShape>: View {
     }
 }
 
+/// The primary "glossed pill": fill, inset gloss, 1px border and the gloss
+/// highlight ring. Used by primary buttons, the active tab and the
+/// progress indicator.
+struct PrimaryChrome<S: InsettableShape>: View {
+    let shape: S
+    var fill: Color = Theme.primary
+    var border: Color = Theme.primaryBorder
+    var small = false
+
+    var body: some View {
+        shape.fill(fill)
+            .overlay(shape.inset(by: 1).fill(fill.glossed(small: small)))
+            .overlay(shape.strokeBorder(border, lineWidth: 1))
+            .overlay(shape.glossRing())
+    }
+}
+
 // MARK: - Pointer cursor
 
 /// Shows the pointing-hand cursor over a clickable control. Disabled views
@@ -373,16 +390,10 @@ struct ThemedButtonStyle: ButtonStyle {
                 .frame(maxWidth: style.fullWidth ? .infinity : nil)
                 .background {
                     if style.variant == .primary {
-                        shape.fill(fill)
-                            .overlay(shape.inset(by: 1).fill(fill.glossed()))
+                        PrimaryChrome(shape: shape, fill: fill, border: borderColor)
                     } else {
                         shape.fill(fill)
-                    }
-                }
-                .overlay(shape.strokeBorder(borderColor, lineWidth: 1))
-                .overlay {
-                    if style.variant == .primary {
-                        shape.glossRing()
+                            .overlay(shape.strokeBorder(borderColor, lineWidth: 1))
                     }
                 }
                 .contentShape(shape)
@@ -483,11 +494,10 @@ struct TabsPicker<Item: Identifiable & Hashable>: View {
         .onPreferenceChange(TabFramePreference.self) { frames = $0 }
         .background(alignment: .topLeading) {
             if let frame = frames[AnyHashable(selection.id)] {
-                let shape = RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
-                shape.fill(Theme.primary)
-                    .overlay(shape.inset(by: 1).fill(Theme.primary.glossed(small: true)))
-                    .overlay(shape.strokeBorder(Theme.primaryBorder, lineWidth: 1))
-                    .overlay(shape.glossRing())
+                PrimaryChrome(
+                    shape: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous),
+                    small: true
+                )
                     .frame(width: frame.width, height: frame.height)
                     .offset(x: frame.minX, y: frame.minY)
             }
@@ -576,10 +586,7 @@ struct ThemedProgress: View {
             ZStack(alignment: .leading) {
                 shape.fill(Theme.tabsTrack)
                 if width > 0 {
-                    shape.fill(Theme.primary)
-                        .overlay(shape.inset(by: 1).fill(Theme.primary.glossed(small: true)))
-                        .overlay(shape.strokeBorder(Theme.primaryBorder, lineWidth: 1))
-                        .overlay(shape.glossRing())
+                    PrimaryChrome(shape: shape, small: true)
                         .frame(width: width)
                 }
             }
