@@ -6,8 +6,6 @@ import CoreText
 /// (src/index.css, button.tsx, tabs.tsx, select.tsx) and the Crisp v1 Figma
 /// (node 23:564). Primary is the sky-blue brand (#44b4ff / #0d95ef).
 enum AppAppearance: String {
-    static let storageKey = "appearance"
-
     case light, dark
 
     var colorScheme: ColorScheme { self == .dark ? .dark : .light }
@@ -18,8 +16,16 @@ enum AppAppearance: String {
 
     var other: AppAppearance { self == .dark ? .light : .dark }
 
-    func apply() {
-        NSApp.appearance = nsAppearance
+    // Persistence and the AppKit/SwiftUI apply are owned by `AppearanceGate`;
+    // everything else only flips the stored value.
+    static let storageKey = "appearance"
+
+    static var stored: AppAppearance {
+        AppAppearance(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .dark
+    }
+
+    static func toggle() {
+        UserDefaults.standard.set(stored.other.rawValue, forKey: storageKey)
     }
 }
 
@@ -644,17 +650,22 @@ struct WindowChrome: NSViewRepresentable {
     }
 }
 
-/// Applies the persisted light/dark setting to SwiftUI and AppKit.
+/// The single owner of the light/dark setting: observes the persisted value
+/// and applies it to SwiftUI (`preferredColorScheme`) and AppKit
+/// (`NSApp.appearance`). Views change it via `AppAppearance.toggle()`.
 struct AppearanceGate: ViewModifier {
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.dark.rawValue
 
+    private var appearance: AppAppearance {
+        AppAppearance(rawValue: appearanceRaw) ?? .dark
+    }
+
     func body(content: Content) -> some View {
-        let appearance = AppAppearance(rawValue: appearanceRaw) ?? .dark
         content
             .preferredColorScheme(appearance.colorScheme)
-            .onAppear { appearance.apply() }
+            .onAppear { NSApp.appearance = appearance.nsAppearance }
             .onChange(of: appearanceRaw) { _, _ in
-                (AppAppearance(rawValue: appearanceRaw) ?? .dark).apply()
+                NSApp.appearance = appearance.nsAppearance
             }
     }
 }

@@ -8,7 +8,7 @@ struct ContentView: View {
     @EnvironmentObject var model: AppModel
 
     @AppStorage("screenshot.format") private var screenshotFormatRaw = ScreenshotFormat.png16.rawValue
-    @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.dark.rawValue
+    @Environment(\.colorScheme) private var colorScheme
 
     private let inset: CGFloat = 24
 
@@ -33,22 +33,19 @@ struct ContentView: View {
         Bundle.main.bundleIdentifier?.hasSuffix(".dev") ?? true
     }
 
-    private var appearance: AppAppearance {
-        AppAppearance(rawValue: appearanceRaw) ?? .dark
-    }
-
     private var appearanceToggle: some View {
-        Button {
-            appearanceRaw = appearance.other.rawValue
+        let isDark = colorScheme == .dark
+        return Button {
+            AppAppearance.toggle()
         } label: {
             Icon(
-                name: appearance == .dark ? "sun" : "moon",
+                name: isDark ? "sun" : "moon",
                 size: 14,
-                fallback: appearance == .dark ? "sun.max" : "moon"
+                fallback: isDark ? "sun.max" : "moon"
             )
         }
         .buttonStyle(.themed(.outline, size: .sm, iconOnly: true))
-        .help(appearance == .dark ? "Switch to light mode" : "Switch to dark mode")
+        .help(isDark ? "Switch to light mode" : "Switch to dark mode")
     }
 
     // MARK: - Controls row
