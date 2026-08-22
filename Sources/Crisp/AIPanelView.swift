@@ -4,13 +4,23 @@ import SwiftUI
 struct AIMessage: Identifiable {
     enum Role { case user, assistant, system }
 
+    struct Activity: Identifiable {
+        let id = UUID()
+        var kind: AIEvent.ActivityKind
+        var detail: String
+    }
+
     let id = UUID()
     var role: Role
     var text: String
-    /// Tool steps the agent took before replying ("Viewed frame_2.jpg").
-    var activities: [String] = []
+    /// Tool steps the agent took before replying.
+    var activities: [Activity] = []
     /// Plan in effect before this reply was applied — enables "Revert".
     var before: [ZoomSegment]?
+
+    mutating func append(paragraph: String) {
+        text = text.isEmpty ? paragraph : text + "\n\n" + paragraph
+    }
 }
 
 /// Conversation state for the editor's AI Polish panel. One per editor window;
@@ -18,13 +28,15 @@ struct AIMessage: Identifiable {
 @MainActor
 final class AIChat: ObservableObject {
     @Published var messages: [AIMessage] = []
-    @Published var running = false
+    @Published private(set) var running = false
+    /// True once a turn has succeeded: the provider picker locks, later sends
+    /// are follow-up notes. Mirrors `Session.started`.
+    @Published private(set) var hasStarted = false
     @Published var providers: [AIProvider] = []
     @Published var provider: AIProvider?
 
     private var session: AIDirector.Session?
-
-    var hasStarted: Bool { messages.contains { $0.role == .assistant } }
+    private var turn: Task<Void, Never>?
 
     func detectProviders() async {
         providers = await AIDirector.detectProviders()
@@ -32,7 +44,8 @@ final class AIChat: ObservableObject {
     }
 
     /// Send a note (may be empty on the first turn = "default polish").
-    /// `apply` is called on the main actor with the validated new plan.
+    /// `apply` is called on the main actor with the validated new plan, after
+    /// every streamed event has landed in the transcript.
     func send(
         note: String,
         recording: Recording, meta: RecordingMeta, duration: Double,
@@ -54,41 +67,61 @@ final class AIChat: ObservableObject {
 
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
         messages.append(AIMessage(role: .user, text: trimmed.isEmpty ? "Polish with the default brief" : trimmed))
-        messages.append(AIMessage(role: .assistant, text: ""))
-        let replyID = messages[messages.count - 1].id
+        let reply = AIMessage(role: .assistant, text: "")
+        messages.append(reply)
         running = true
 
-        Task {
-            do {
-                let plan = try await session.send(note: trimmed, segments: segments) { event in
-                    Task { @MainActor in self.absorb(event, into: replyID) }
+        turn = Task {
+            // Events are yielded from the pipe thread into an ordered stream and
+            // drained here, on the main actor, before the outcome is handled —
+            // so the transcript is complete when the plan is applied.
+            let (events, continuation) = AsyncStream<AIEvent>.makeStream()
+            async let outcome: Result<[ZoomSegment], Error> = {
+                defer { continuation.finish() }
+                do {
+                    return .success(try await session.send(note: trimmed, segments: segments) { continuation.yield($0) })
+                } catch {
+                    return .failure(error)
                 }
-                update(replyID) { $0.before = segments }
+            }()
+            for await event in events {
+                absorb(event, into: reply.id)
+            }
+            switch await outcome {
+            case .success(let plan):
+                update(reply.id) {
+                    $0.before = segments
+                    $0.append(paragraph: "Applied: \(segments.count) → \(plan.count) zooms.")
+                }
+                hasStarted = true
                 apply(plan)
-                let summary = "Applied: \(segments.count) → \(plan.count) zooms."
-                update(replyID) { $0.text = $0.text.isEmpty ? summary : $0.text + "\n\n" + summary }
-            } catch {
-                update(replyID) {
-                    $0.text = $0.text.isEmpty ? "" : $0.text + "\n\n"
-                    $0.text += "⚠︎ \(error.localizedDescription)"
-                }
+            case .failure(is CancellationError):
+                update(reply.id) { $0.append(paragraph: "Cancelled.") }
+            case .failure(let error):
+                update(reply.id) { $0.append(paragraph: "⚠︎ \(error.localizedDescription)") }
             }
             running = false
+            turn = nil
         }
     }
 
+    /// Cancel any in-flight turn and forget the conversation.
     func clear() {
+        turn?.cancel()
+        turn = nil
+        running = false
         messages.removeAll()
         session = nil
+        hasStarted = false
     }
 
     private func absorb(_ event: AIEvent, into id: UUID) {
         update(id) { message in
             switch event {
             case .text(let text):
-                message.text = message.text.isEmpty ? text : message.text + "\n\n" + text
-            case .activity(let activity):
-                message.activities.append(activity)
+                message.append(paragraph: text)
+            case .activity(let kind, let detail):
+                message.activities.append(.init(kind: kind, detail: detail))
             }
         }
     }
@@ -103,6 +136,8 @@ final class AIChat: ObservableObject {
 /// composer. The first send polishes with the built-in brief (plus any note);
 /// later sends are follow-up director's notes in the same session.
 struct AIPanelView: View {
+    static let width: CGFloat = 320
+
     @ObservedObject var chat: AIChat
     let recording: Recording
     let meta: RecordingMeta?
@@ -122,7 +157,7 @@ struct AIPanelView: View {
             Divider().overlay(Theme.border)
             composer
         }
-        .frame(width: 320)
+        .frame(width: Self.width)
         .background(Theme.panel)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusLg))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusLg).strokeBorder(Theme.border))
@@ -144,15 +179,14 @@ struct AIPanelView: View {
             .fixedSize()
             .disabled(chat.running || chat.hasStarted)
             .help(chat.hasStarted ? "Clear the conversation to switch provider" : "Agent CLI to use")
-            if chat.hasStarted {
+            if !chat.messages.isEmpty {
                 Button {
                     chat.clear()
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .buttonStyle(.themed(.ghost, size: .xs))
-                .disabled(chat.running)
-                .help("Start a new conversation")
+                .help(chat.running ? "Stop and start a new conversation" : "Start a new conversation")
             }
             Button {
                 onClose()
@@ -181,17 +215,18 @@ struct AIPanelView: View {
                 }
                 .padding(12)
             }
-            .onChange(of: chat.messages.last?.text) { _, _ in
-                if let id = chat.messages.last?.id {
-                    withAnimation { proxy.scrollTo(id, anchor: .bottom) }
-                }
-            }
-            .onChange(of: chat.messages.last?.activities.count) { _, _ in
+            .onChange(of: scrollKey) { _, _ in
                 if let id = chat.messages.last?.id {
                     withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                 }
             }
         }
+    }
+
+    /// Changes whenever the last message appears or grows.
+    private var scrollKey: String {
+        guard let last = chat.messages.last else { return "" }
+        return "\(last.id)/\(last.text.count)/\(last.activities.count)"
     }
 
     private var intro: some View {
@@ -243,9 +278,13 @@ struct AIPanelView: View {
     }
 
     private var canSend: Bool {
-        guard chat.provider != nil, meta != nil, !chat.running, !segments.isEmpty else { return false }
-        // First turn may be note-less (default brief); follow-ups need a note.
-        return !chat.hasStarted || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard chat.provider != nil, meta != nil, !chat.running else { return false }
+        if chat.hasStarted {
+            // Follow-ups need a note; an empty plan is a legitimate state to iterate from.
+            return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        // The first turn may be note-less (default brief) but needs a plan to polish.
+        return !segments.isEmpty
     }
 
     private func send() {
@@ -282,8 +321,8 @@ private struct MessageRow: View {
                 .foregroundStyle(Theme.destructive)
         case .assistant:
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(message.activities.enumerated()), id: \.offset) { _, activity in
-                    Label(activity, systemImage: icon(for: activity))
+                ForEach(message.activities) { activity in
+                    Label(label(for: activity), systemImage: icon(for: activity.kind))
                         .font(Theme.font(11))
                         .foregroundStyle(Theme.mutedForeground)
                         .lineLimit(1)
@@ -308,12 +347,24 @@ private struct MessageRow: View {
         }
     }
 
-    private func icon(for activity: String) -> String {
-        if activity.hasPrefix("Viewed") { return "eye" }
-        if activity.hasPrefix("Wrote") { return "square.and.pencil" }
-        if activity.hasPrefix("Ran") { return "terminal" }
-        if activity.hasPrefix("Started") { return "arrow.triangle.2.circlepath" }
-        return "wrench"
+    private func label(for activity: AIMessage.Activity) -> String {
+        switch activity.kind {
+        case .viewed: return "Viewed \(activity.detail)"
+        case .wrote: return "Wrote \(activity.detail)"
+        case .ran: return "Ran \(activity.detail)"
+        case .other: return activity.detail
+        case .sessionRestarted: return "Started a new session"
+        }
+    }
+
+    private func icon(for kind: AIEvent.ActivityKind) -> String {
+        switch kind {
+        case .viewed: return "eye"
+        case .wrote: return "square.and.pencil"
+        case .ran: return "terminal"
+        case .other: return "wrench"
+        case .sessionRestarted: return "arrow.triangle.2.circlepath"
+        }
     }
 
     private func markdown(_ text: String) -> AttributedString {

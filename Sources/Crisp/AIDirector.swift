@@ -25,8 +25,14 @@ struct AIProvider: Identifiable, Equatable, Hashable {
 enum AIEvent {
     /// A complete assistant message block (markdown-ish prose).
     case text(String)
-    /// A one-line description of a tool step: "Viewed frame_2.jpg", "Wrote plan.json".
-    case activity(String)
+    /// A tool step the agent took, e.g. `.activity(.viewed, "frame_2.jpg")`.
+    case activity(ActivityKind, String)
+
+    enum ActivityKind {
+        case viewed, wrote, ran, other
+        /// The previous provider session was unusable; a fresh one was started.
+        case sessionRestarted
+    }
 }
 
 enum AIDirector {
@@ -64,9 +70,12 @@ enum AIDirector {
         private let workspace: URL
         private var frames: [Frame] = []
         /// Claude: a UUID we choose up front (`--session-id`). Codex: the
-        /// thread id reported by its first `thread.started` event.
+        /// thread id reported by its first `thread.started` event. Cleared
+        /// whenever a turn fails before the conversation is established so a
+        /// possibly-taken id is never reused.
         private var sessionID: String?
-        private var started = false
+        /// True once a turn has completed successfully; later turns resume.
+        private(set) var started = false
 
         init(provider: AIProvider, recording: Recording, meta: RecordingMeta, duration: Double) throws {
             self.provider = provider
@@ -90,44 +99,58 @@ enum AIDirector {
             segments: [ZoomSegment],
             onEvent: @escaping (AIEvent) -> Void
         ) async throws -> [ZoomSegment] {
-            if frames.isEmpty {
-                frames = try await AIDirector.extractFrames(
-                    masterURL: recording.masterURL, segments: segments, duration: duration, into: workspace
-                )
-            }
-            // Always refresh: the user may have hand-edited since the last turn.
+            // Frames follow the current plan (one per zoom opening), so refresh
+            // them every turn along with context.json — the user may have
+            // hand-edited, or the agent may have rewritten the plan last turn.
+            frames = try await AIDirector.extractFrames(
+                masterURL: recording.masterURL, segments: segments, duration: duration, into: workspace
+            )
             let context = try AIDirector.buildContext(meta: meta, duration: duration, segments: segments, frames: frames)
             try context.write(to: workspace.appendingPathComponent("context.json"))
+            // Seed plan.json with the current plan so "nothing to change" is a
+            // valid outcome: the agent overwrites it, or leaves it as is.
             let planURL = workspace.appendingPathComponent("plan.json")
-            try? FileManager.default.removeItem(at: planURL)
+            try AIDirector.encodePlan(segments).write(to: planURL)
 
-            let prompt = started
-                ? AIDirector.followUpPrompt(note: note)
-                : AIDirector.firstPrompt(note: note, frames: frames, workspace: workspace)
-            try Data(prompt.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
+            var retriedFresh = false
+            while true {
+                let resuming = started
+                let prompt = resuming
+                    ? AIDirector.followUpPrompt(note: note)
+                    : AIDirector.firstPrompt(note: note, frames: frames, workspace: workspace)
+                try Data(prompt.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
 
-            var sawEvent = false
-            var errorMessage: String?
-            let command = makeCommand(resume: started)
-            do {
-                _ = try await AIDirector.runShell(command, cwd: workspace, timeout: 300) { line in
-                    guard let event = self.parseLine(line, error: &errorMessage) else { return }
-                    sawEvent = true
-                    onEvent(event)
+                var sawEvent = false
+                var errorMessage: String?
+                var failure: Error?
+                do {
+                    try await AIDirector.runShell(makeCommand(resume: resuming), cwd: workspace, timeout: 300) { line in
+                        guard let event = self.parseLine(line, error: &errorMessage) else { return }
+                        sawEvent = true
+                        onEvent(event)
+                    }
+                } catch {
+                    failure = error
                 }
-            } catch {
-                // A stale provider session (e.g. cleared CLI history) fails
-                // before emitting anything; fall back to a fresh conversation.
-                if started && !sawEvent {
-                    AppModel.log("AI polish: resume failed, starting a fresh session: \(error.localizedDescription)")
+                if failure == nil, let errorMessage {
+                    failure = DirectorError.cliFailed(errorMessage)
+                }
+                guard let failure else { break }
+
+                // A stale provider session (e.g. cleared CLI history) fails —
+                // via exit status or an error envelope — before emitting any
+                // event. Fall back once to a fresh conversation.
+                if resuming && !sawEvent && !retriedFresh && !(failure is CancellationError) {
+                    AppModel.log("AI polish: resume failed, starting a fresh session: \(failure.localizedDescription)")
+                    retriedFresh = true
                     started = false
                     sessionID = nil
-                    onEvent(.activity("Started a new session"))
-                    return try await send(note: note, segments: segments, onEvent: onEvent)
+                    onEvent(.activity(.sessionRestarted, ""))
+                    continue
                 }
-                throw error
+                if !started { sessionID = nil }
+                throw failure
             }
-            if let errorMessage { throw DirectorError.cliFailed(errorMessage) }
             started = true
 
             guard let data = try? Data(contentsOf: planURL) else {
@@ -152,8 +175,9 @@ enum AIDirector {
             let bin = "\"\(provider.path)\""
             switch provider.kind {
             case .claude:
-                if sessionID == nil { sessionID = UUID().uuidString.lowercased() }
-                let session = resume ? "--resume \(sessionID!)" : "--session-id \(sessionID!)"
+                let id = sessionID ?? UUID().uuidString.lowercased()
+                sessionID = id
+                let session = resume ? "--resume \(id)" : "--session-id \(id)"
                 // acceptEdits: file writes inside the workspace cwd are auto-approved.
                 return "\(bin) -p \(session) --output-format stream-json --verbose --permission-mode acceptEdits < prompt.txt"
             case .codex:
@@ -183,28 +207,25 @@ enum AIDirector {
                     guard let message = obj["message"] as? [String: Any],
                           let content = message["content"] as? [[String: Any]] else { return nil }
                     var texts: [String] = []
-                    var activities: [String] = []
+                    var activity: AIEvent?
                     for block in content {
                         if block["type"] as? String == "text", let text = block["text"] as? String {
                             texts.append(text)
-                        } else if block["type"] as? String == "tool_use",
+                        } else if activity == nil, block["type"] as? String == "tool_use",
                                   let name = block["name"] as? String {
                             let input = block["input"] as? [String: Any] ?? [:]
                             let path = (input["file_path"] as? String).map { ($0 as NSString).lastPathComponent }
                             switch name {
-                            case "Read": activities.append("Viewed \(path ?? "file")")
-                            case "Write", "Edit": activities.append("Wrote \(path ?? "file")")
-                            case "Bash":
-                                let cmd = input["command"] as? String ?? "command"
-                                activities.append("Ran \(cmd.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? cmd)")
-                            default: activities.append(name)
+                            case "Read": activity = .activity(.viewed, path ?? "file")
+                            case "Write", "Edit": activity = .activity(.wrote, path ?? "file")
+                            case "Bash": activity = .activity(.ran, AIDirector.firstLine(of: input["command"] as? String ?? "command"))
+                            default: activity = .activity(.other, name)
                             }
                         }
                     }
                     // A block list is either text or tool uses in practice.
                     if !texts.isEmpty { return .text(texts.joined(separator: "\n")) }
-                    if !activities.isEmpty { return .activity(activities.joined(separator: ", ")) }
-                    return nil
+                    return activity
                 case "result":
                     if obj["is_error"] as? Bool == true {
                         error = obj["result"] as? String ?? "Claude reported an error"
@@ -227,19 +248,17 @@ enum AIDirector {
                     case "file_change":
                         let names = (item["changes"] as? [[String: Any]] ?? [])
                             .compactMap { ($0["path"] as? String).map { ($0 as NSString).lastPathComponent } }
-                        return .activity("Wrote \(names.joined(separator: ", "))")
+                        return .activity(.wrote, names.joined(separator: ", "))
                     case "command_execution":
                         var cmd = item["command"] as? String ?? "command"
                         for prefix in ["/bin/zsh -lc ", "/bin/bash -lc "] where cmd.hasPrefix(prefix) {
                             cmd = String(cmd.dropFirst(prefix.count))
                         }
-                        cmd = cmd.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                        let firstLine = cmd.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? cmd
-                        return .activity("Ran \(firstLine)\(firstLine.count < cmd.count ? " …" : "")")
-                    case "reasoning":
+                        return .activity(.ran, AIDirector.firstLine(of: cmd.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))))
+                    case "reasoning", "user_message":
                         return nil
                     default:
-                        return .activity(itemType.replacingOccurrences(of: "_", with: " "))
+                        return .activity(.other, itemType.replacingOccurrences(of: "_", with: " "))
                     }
                 case "error":
                     error = obj["message"] as? String ?? "Codex reported an error"
@@ -249,6 +268,11 @@ enum AIDirector {
                 }
             }
         }
+    }
+
+    private static func firstLine(of command: String) -> String {
+        guard let line = command.split(separator: "\n", maxSplits: 1).first else { return command }
+        return line.count < command.count ? "\(line) …" : String(line)
     }
 
     // MARK: - Context assembly
@@ -299,6 +323,20 @@ enum AIDirector {
         for event in meta.events where event.kind == .leftDown || event.kind == .rightDown {
             clicks.append(["t": round2(event.t), "x": round2(event.x), "y": round2(event.y)])
         }
+        let plan = try JSONSerialization.jsonObject(with: encodePlan(segments))
+        let context: [String: Any] = [
+            "video": ["durationSeconds": round2(duration), "pixelWidth": meta.pixelWidth, "pixelHeight": meta.pixelHeight],
+            "clicks": clicks,
+            "currentPlan": plan,
+            "frames": frames.map { ["file": $0.file, "atSeconds": round2($0.t), "label": $0.label] },
+        ]
+        return try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys])
+    }
+
+    private static func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+
+    /// The plan in the exact shape the agent is asked to write back.
+    private static func encodePlan(_ segments: [ZoomSegment]) throws -> Data {
         let plan: [[String: Any]] = segments.map { seg in
             [
                 "start": round2(seg.start), "end": round2(seg.end), "zoom": round2(seg.zoom),
@@ -309,16 +347,8 @@ enum AIDirector {
                 ] },
             ]
         }
-        let context: [String: Any] = [
-            "video": ["durationSeconds": round2(duration), "pixelWidth": meta.pixelWidth, "pixelHeight": meta.pixelHeight],
-            "clicks": clicks,
-            "currentPlan": ["segments": plan],
-            "frames": frames.map { ["file": $0.file, "atSeconds": round2($0.t), "label": $0.label] },
-        ]
-        return try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys])
+        return try JSONSerialization.data(withJSONObject: ["segments": plan], options: [.sortedKeys])
     }
-
-    private static func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
 
     private static let planShape =
         #"{"segments":[{"start":0.0,"end":0.0,"zoom":1.8,"cx":0.0,"cy":0.0,"pans":[{"t":0.0,"duration":0.5,"cx":0.0,"cy":0.0}]}]}"#
@@ -357,8 +387,8 @@ enum AIDirector {
         and 2.2 unless a tiny UI element justifies more.
         5. Calm pacing: leave breathing room at full frame between zoom bursts.
         \(userNote)
-        When you're done, write the plan to \(workspace.appendingPathComponent("plan.json").path) \
-        as a JSON object with exactly this shape:
+        \(workspace.appendingPathComponent("plan.json").path) currently holds the current plan. \
+        When you're done, overwrite it with your polished plan — a JSON object with exactly this shape:
         \(planShape)
         All times in seconds within the video duration; cx/cy in pixels within the video size. \
         Segments sorted and non-overlapping. `pans` may be an empty array.
@@ -374,8 +404,10 @@ enum AIDirector {
         Director's note: \(note)
 
         The current plan is in context.json in this directory (it may have been hand-edited \
-        since your last reply). Apply the note, write the updated plan to plan.json in the same \
-        shape as before, and reply in 2–4 plain sentences describing what you changed.
+        since your last reply), and the frame_*.jpg stills have been re-extracted at each of \
+        its zoom openings. plan.json also holds the current plan. Apply the note by overwriting \
+        plan.json in the same shape as before (leave it untouched only if the note is already \
+        satisfied), and reply in 2–4 plain sentences describing what you changed.
         """
     }
 
@@ -438,91 +470,137 @@ enum AIDirector {
     // MARK: - Shell
 
     /// Run a command through a login shell (for PATH). stdout is consumed
-    /// incrementally (so large outputs can't deadlock the pipe) and, when
-    /// `onLine` is given, delivered line by line as it arrives.
+    /// incrementally and, when `onLine` is given, delivered line by line as
+    /// it arrives (and not retained); otherwise the full stdout is returned.
+    ///
+    /// Fails on any non-zero exit, on the timeout, and on task cancellation
+    /// (the child is terminated in both cases). Completion waits for stdout
+    /// EOF so the last lines are delivered, but only briefly after exit so a
+    /// backgrounded grandchild holding the pipe can't hang us.
     private static func runShell(
         _ command: String, cwd: URL?, timeout: TimeInterval,
         onLine: ((String) -> Void)?
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-l", "-c", command]
-            if let cwd { process.currentDirectoryURL = cwd }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-l", "-c", command]
+        if let cwd { process.currentDirectoryURL = cwd }
+        // If Crisp itself was launched from inside a Claude Code session, the
+        // nested CLI would otherwise attach to that session (and has been seen
+        // to take the parent down with SIGTERM). Give it a clean slate.
+        process.environment = ProcessInfo.processInfo.environment.filter { key, _ in
+            !(key == "CLAUDECODE" || key == "CLAUDE_PID" || key.hasPrefix("CLAUDE_CODE_"))
+        }
 
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-            var outData = Data()
-            var errData = Data()
-            var lineBuffer = Data()
-            let dataQueue = DispatchQueue(label: "crisp.ai.pipe")
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
 
-            func drainLines(final: Bool) {
-                guard let onLine else { return }
-                while let newline = lineBuffer.firstIndex(of: UInt8(ascii: "\n")) {
-                    let line = String(decoding: lineBuffer[lineBuffer.startIndex..<newline], as: UTF8.self)
-                    lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
-                    if !line.isEmpty { onLine(line) }
+                let queue = DispatchQueue(label: "crisp.ai.pipe")
+                var outData = Data()           // only filled when onLine == nil
+                var errData = Data()
+                var lineBuffer = Data()
+                var stdoutClosed = false
+                var exited = false
+                var timedOut = false
+                var finished = false
+
+                func finish() {
+                    guard !finished else { return }
+                    finished = true
+                    if onLine != nil, !lineBuffer.isEmpty {
+                        onLine?(String(decoding: lineBuffer, as: UTF8.self))
+                    }
+                    stdout.fileHandleForReading.readabilityHandler = nil
+                    stderr.fileHandleForReading.readabilityHandler = nil
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if timedOut {
+                        continuation.resume(throwing: DirectorError.timedOut)
+                    } else if process.terminationStatus != 0 {
+                        let err = String(decoding: errData, as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        continuation.resume(throwing: DirectorError.cliFailed(
+                            err.isEmpty ? "exit status \(process.terminationStatus)" : String(err.suffix(300))
+                        ))
+                    } else {
+                        continuation.resume(returning: String(decoding: outData, as: UTF8.self))
+                    }
                 }
-                if final, !lineBuffer.isEmpty {
-                    onLine(String(decoding: lineBuffer, as: UTF8.self))
-                    lineBuffer.removeAll()
+
+                stdout.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    queue.async {
+                        if chunk.isEmpty {
+                            // EOF: stop the handler (Foundation re-invokes it otherwise).
+                            stdout.fileHandleForReading.readabilityHandler = nil
+                            stdoutClosed = true
+                            if exited { finish() }
+                            return
+                        }
+                        guard let onLine else { outData.append(chunk); return }
+                        var scanFrom = lineBuffer.endIndex
+                        lineBuffer.append(chunk)
+                        while let newline = lineBuffer[scanFrom...].firstIndex(of: UInt8(ascii: "\n")) {
+                            let line = String(decoding: lineBuffer[lineBuffer.startIndex..<newline], as: UTF8.self)
+                            lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
+                            scanFrom = lineBuffer.startIndex
+                            if !line.isEmpty { onLine(line) }
+                        }
+                    }
+                }
+                stderr.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    queue.async {
+                        if chunk.isEmpty {
+                            stderr.fileHandleForReading.readabilityHandler = nil
+                        } else {
+                            errData.append(chunk)
+                        }
+                    }
+                }
+
+                let timeoutWork = DispatchWorkItem {
+                    queue.async { timedOut = true }
+                    if process.isRunning { process.terminate() }
+                }
+                queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
+
+                process.terminationHandler = { _ in
+                    timeoutWork.cancel()
+                    queue.async {
+                        exited = true
+                        if stdoutClosed {
+                            finish()
+                        } else {
+                            // Grace period for the pipe to drain before giving up on EOF.
+                            queue.asyncAfter(deadline: .now() + 1.0) { finish() }
+                        }
+                    }
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    timeoutWork.cancel()
+                    queue.async {
+                        guard !finished else { return }
+                        finished = true
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
-
-            stdout.fileHandleForReading.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                dataQueue.sync {
-                    outData.append(chunk)
-                    lineBuffer.append(chunk)
-                    drainLines(final: false)
-                }
-            }
-            stderr.fileHandleForReading.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                dataQueue.sync { errData.append(chunk) }
-            }
-
-            let timeoutWork = DispatchWorkItem {
-                if process.isRunning {
-                    process.terminate()
-                }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
-
-            process.terminationHandler = { proc in
-                timeoutWork.cancel()
-                stdout.fileHandleForReading.readabilityHandler = nil
-                stderr.fileHandleForReading.readabilityHandler = nil
-                dataQueue.sync {
-                    let rest = stdout.fileHandleForReading.readDataToEndOfFile()
-                    outData.append(rest)
-                    lineBuffer.append(rest)
-                    drainLines(final: true)
-                    errData.append(stderr.fileHandleForReading.readDataToEndOfFile())
-                }
-                let out = String(data: outData, encoding: .utf8) ?? ""
-                if proc.terminationStatus != 0 && out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let err = String(data: errData, encoding: .utf8) ?? ""
-                    continuation.resume(throwing: DirectorError.cliFailed(String(err.suffix(300))))
-                } else {
-                    continuation.resume(returning: out)
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                timeoutWork.cancel()
-                continuation.resume(throwing: error)
-            }
+        } onCancel: {
+            if process.isRunning { process.terminate() }
         }
     }
 
     enum DirectorError: LocalizedError {
         case cliFailed(String)
+        case timedOut
         case unparseableOutput
         case noPlanWritten
         case emptyPlan
@@ -531,10 +609,12 @@ enum AIDirector {
             switch self {
             case .cliFailed(let detail):
                 return "The AI tool failed: \(detail)"
+            case .timedOut:
+                return "The AI tool took too long and was stopped — your zooms are unchanged."
             case .unparseableOutput:
                 return "The AI wrote an invalid plan.json (see ~/Library/Logs/Crisp.log)."
             case .noPlanWritten:
-                return "The AI replied but didn't write a plan — your zooms are unchanged."
+                return "The AI removed the plan file — your zooms are unchanged."
             case .emptyPlan:
                 return "The AI returned an empty plan — kept your current zooms."
             }

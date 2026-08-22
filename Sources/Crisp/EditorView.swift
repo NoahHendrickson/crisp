@@ -67,6 +67,8 @@ struct EditorView: View {
     @State private var showAIPanel = false
 
     private var recording: Recording { Recording(folder: folder) }
+    private let baseMinWidth: CGFloat = 880
+    private let panelSpacing: CGFloat = 14
 
     var body: some View {
         Group {
@@ -75,14 +77,18 @@ struct EditorView: View {
                     .foregroundStyle(.red)
                     .padding()
             } else {
-                HStack(spacing: 14) {
+                HStack(spacing: panelSpacing) {
                     VStack(spacing: 12) {
                         PlayerLayerView(player: player)
                             .frame(minHeight: 300)
                             .background(Color.black)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
+                        // Plan edits are locked while a turn is in flight so the
+                        // agent's reply can't clobber them.
                         timeline
+                            .disabled(aiChat.running)
                         inspector
+                            .disabled(aiChat.running)
                         controls
                     }
                     if showAIPanel {
@@ -107,7 +113,7 @@ struct EditorView: View {
         .font(Theme.font(14))
         .foregroundStyle(Theme.foreground)
         .groupBoxStyle(.card)
-        .frame(minWidth: showAIPanel ? 1214 : 880, minHeight: 660)
+        .frame(minWidth: showAIPanel ? baseMinWidth + panelSpacing + AIPanelView.width : baseMinWidth, minHeight: 660)
         .background(Theme.background)
         .background(WindowChrome())
         .navigationTitle("Zoom Editor — \(recording.name)")
@@ -540,17 +546,23 @@ struct EditorView: View {
                 addZoomAtPlayhead()
             }
             .buttonStyle(.themed(.outline))
+            .disabled(aiChat.running)
             Button("Revert to Auto") {
                 try? FileManager.default.removeItem(at: recording.planURL)
                 segments = autoSegments()
                 selection = nil
             }
             .buttonStyle(.themed(.ghost))
+            .disabled(aiChat.running)
             .help("Discard edits and regenerate zooms from the click log")
             Button {
                 withAnimation { showAIPanel.toggle() }
             } label: {
-                Label("AI Polish", systemImage: "wand.and.stars")
+                if aiChat.running {
+                    Label { Text("AI Polish") } icon: { ProgressView().controlSize(.mini) }
+                } else {
+                    Label("AI Polish", systemImage: "wand.and.stars")
+                }
             }
             .buttonStyle(.themed(showAIPanel ? .secondary : .outline, leadingIcon: true))
             .help("Open the AI Polish panel: hand the plan to Claude Code or Codex for editorial touch-up")
@@ -565,6 +577,7 @@ struct EditorView: View {
                     model.export(recording)
                 }
                 .buttonStyle(.themed(.primary))
+                .disabled(aiChat.running)
             }
         }
     }
