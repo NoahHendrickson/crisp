@@ -57,6 +57,7 @@ final class AppModel: ObservableObject {
     @Published var codec: MasterCodec = .hevc10
     @Published var recordings: [Recording] = []
     @Published var exportProgress: [URL: Double] = [:]
+    private var exportRenderers: [URL: Renderer] = [:]
     @Published var thumbnails: [ThumbKey: CGImage] = [:]
     @Published var regionPreview: CGImage?
     @Published var isPickingRegion = false
@@ -436,6 +437,7 @@ final class AppModel: ObservableObject {
         guard exportProgress[recording.folder] == nil else { return }
         exportProgress[recording.folder] = 0
         let renderer = Renderer()
+        exportRenderers[recording.folder] = renderer
         Task.detached { [weak self] in
             do {
                 try await renderer.export(recording: recording) { fraction in
@@ -444,17 +446,30 @@ final class AppModel: ObservableObject {
                     }
                 }
                 await MainActor.run { [weak self] in
-                    self?.exportProgress[recording.folder] = nil
+                    self?.clearExport(recording.folder)
                     self?.recordings = Recording.loadAll()
                     NSWorkspace.shared.activateFileViewerSelecting([recording.exportURL])
                 }
+            } catch is Renderer.Cancelled {
+                await MainActor.run { [weak self] in
+                    self?.clearExport(recording.folder)
+                }
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.exportProgress[recording.folder] = nil
+                    self?.clearExport(recording.folder)
                     self?.state = .error("Export failed: \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    func cancelExport(_ recording: Recording) {
+        exportRenderers[recording.folder]?.isCancelled = true
+    }
+
+    private func clearExport(_ folder: URL) {
+        exportProgress[folder] = nil
+        exportRenderers[folder] = nil
     }
 
     func reveal(_ recording: Recording) {
