@@ -31,31 +31,6 @@ struct ZoomPlanner {
         var holdAfter: Double = 1.3
         /// While zoomed, re-center if a click lands this far (fraction of frame) from center.
         var recenterThreshold: Double = 0.18
-
-        // UserDefaults keys for the user-facing knobs (shared with the UI).
-        static let levelKey = "zoom.level"
-        static let leadInKey = "zoom.leadIn"
-        static let inDurationKey = "zoom.inDuration"
-        static let holdAfterKey = "zoom.holdAfter"
-
-        /// Config with any user-adjusted values applied over the defaults.
-        static func fromUserDefaults() -> Config {
-            var config = Config()
-            let defaults = UserDefaults.standard
-            if defaults.object(forKey: levelKey) != nil {
-                config.zoomLevel = defaults.double(forKey: levelKey)
-            }
-            if defaults.object(forKey: leadInKey) != nil {
-                config.leadIn = defaults.double(forKey: leadInKey)
-            }
-            if defaults.object(forKey: inDurationKey) != nil {
-                config.zoomInDuration = defaults.double(forKey: inDurationKey)
-            }
-            if defaults.object(forKey: holdAfterKey) != nil {
-                config.holdAfter = defaults.double(forKey: holdAfterKey)
-            }
-            return config
-        }
     }
 
     let width: Double

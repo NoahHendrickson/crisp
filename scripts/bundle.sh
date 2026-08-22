@@ -30,6 +30,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/Crisp "$APP/Contents/MacOS/Crisp"
+# SwiftPM resource bundle (fonts, icons) — Bundle.module looks in Contents/Resources.
+cp -R .build/release/Crisp_Crisp.bundle "$APP/Contents/Resources/"
 if [[ -f "$ICON" ]]; then
     cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 fi
