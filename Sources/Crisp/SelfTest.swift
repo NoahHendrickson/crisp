@@ -97,22 +97,45 @@ enum SelfTest {
         // amount of the user's agent-CLI quota, so only on request).
         if ProcessInfo.processInfo.environment["CRISP_AI_SELFTEST"] == "1" {
             let providers = await AIDirector.detectProviders()
-            guard let provider = providers.first(where: { $0.kind == .claude }) ?? providers.first else {
+            let wanted = ProcessInfo.processInfo.environment["CRISP_AI_PROVIDER"]?.lowercased()
+            guard let provider = providers.first(where: { $0.kind.rawValue.lowercased() == wanted })
+                    ?? providers.first(where: { $0.kind == .claude }) ?? providers.first else {
                 throw SelfTestError.noAIProvider
             }
             print("selftest: AI polish via \(provider.kind.rawValue)…")
             let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
-            let polished = try await AIDirector.polish(
-                recording: recording, meta: meta, duration: duration,
-                segments: auto, note: "test run — keep it minimal", provider: provider
+            let session = try AIDirector.Session(
+                provider: provider, recording: recording, meta: meta, duration: duration
+            )
+            var restarted = false
+            let report: (AIEvent) -> Void = { event in
+                switch event {
+                case .activity(.sessionRestarted, _):
+                    restarted = true
+                    print("selftest:   · started a new session")
+                case .activity(let kind, let detail): print("selftest:   · \(kind) \(detail)")
+                case .text(let t): print("selftest:   \(t.prefix(200))")
+                }
+            }
+            let polished = try await session.send(
+                note: "test run — keep it minimal", segments: auto, onEvent: report
             )
             print("selftest: AI polish ok — \(auto.count) → \(polished.count) segments")
             for seg in polished {
                 print(String(format: "  zoom %.2f–%.2fs @%.1fx center(%.0f,%.0f) pans:%d",
                              seg.start, seg.end, seg.zoom, seg.cx, seg.cy, seg.pans.count))
             }
+            // Second turn must resume the same provider session and honor the note.
+            print("selftest: AI follow-up turn…")
+            let followUp = try await session.send(
+                note: "drop every pan and keep at most one zoom", segments: polished, onEvent: report
+            )
+            let pans = followUp.reduce(0) { $0 + $1.pans.count }
+            guard !restarted else { throw SelfTestError.aiResumeFailed }
+            guard followUp.count <= 1, pans == 0 else { throw SelfTestError.aiIgnoredNote(segments: followUp.count, pans: pans) }
+            print("selftest: AI follow-up ok — \(polished.count) → \(followUp.count) segments, pans: \(pans), resumed")
         }
     }
 
@@ -230,5 +253,7 @@ enum SelfTest {
         case badDuration(Double)
         case badSize(CGSize)
         case noAIProvider
+        case aiResumeFailed
+        case aiIgnoredNote(segments: Int, pans: Int)
     }
 }
