@@ -8,8 +8,7 @@ struct ZoomFrameOverlay: View {
     let pixelWidth: Double
     let pixelHeight: Double
     let zoomRange: ClosedRange<Double>
-    /// The zoom level is shared between a segment and its pans, so pans edit
-    /// the center only.
+    /// False when only the center may change: no corner handles.
     let zoomEditable: Bool
     /// False when the box only mirrors the camera at the playhead (e.g. the
     /// playhead is outside the selected zoom): no drag, no corner handles.
@@ -78,8 +77,13 @@ struct ZoomFrameOverlay: View {
                     }
                 }
             }
+            // Gestures on the corner handles report locations in this space so
+            // they line up with `video` / `box`, which are computed in it.
+            .coordinateSpace(name: Self.space)
         }
     }
+
+    private static let space = "zoom-overlay"
 
     // MARK: - Geometry
 
@@ -137,7 +141,7 @@ struct ZoomFrameOverlay: View {
     /// Dragging a corner scales the box about its center; the box's aspect
     /// ratio is fixed by the video, so only the zoom level changes.
     private func resizeGesture(corner: Corner, video: CGRect, scale: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 1, coordinateSpace: .named(Self.space))
             .onChanged { value in
                 if resizeStartZoom == nil { resizeStartZoom = zoom }
                 let c = clampedCenter(cx: cx, cy: cy, zoom: resizeStartZoom ?? zoom)

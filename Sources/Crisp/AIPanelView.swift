@@ -17,6 +17,9 @@ struct AIMessage: Identifiable {
     var activities: [Activity] = []
     /// Plan in effect before this reply was applied — enables "Revert".
     var before: [ZoomSegment]?
+    /// Plan this reply put in place. "Compare" plays `before` against this,
+    /// not against whatever the editor holds now.
+    var after: [ZoomSegment]?
 
     mutating func append(paragraph: String) {
         text = text.isEmpty ? paragraph : text + "\n\n" + paragraph
@@ -150,6 +153,7 @@ final class AIChat: ObservableObject {
             case .success(let plan):
                 update(reply.id) {
                     $0.before = segments
+                    $0.after = plan
                     $0.append(paragraph: "Applied: \(segments.count) → \(plan.count) zooms.")
                 }
                 hasStarted = true
@@ -206,8 +210,9 @@ struct AIPanelView: View {
     let duration: Double
     let segments: [ZoomSegment]
     let onApply: ([ZoomSegment]) -> Void
-    /// Open the split before/after preview against the given baseline plan.
-    let onCompare: ([ZoomSegment]) -> Void
+    /// Open the split preview of one reply's change: its `before` plan
+    /// against the `after` plan it applied.
+    let onCompare: (_ before: [ZoomSegment], _ after: [ZoomSegment]) -> Void
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
@@ -397,7 +402,7 @@ private struct MessageRow: View {
     let isLast: Bool
     let running: Bool
     let onRevert: ([ZoomSegment]) -> Void
-    let onCompare: ([ZoomSegment]) -> Void
+    let onCompare: (_ before: [ZoomSegment], _ after: [ZoomSegment]) -> Void
 
     var body: some View {
         switch message.role {
@@ -435,9 +440,11 @@ private struct MessageRow: View {
                 }
                 if let before = message.before {
                     HStack(spacing: 12) {
-                        Button("Compare") { onCompare(before) }
-                            .buttonStyle(.themed(.link, size: .xs))
-                            .tooltip("Play the edited zooms before and after this change, stacked")
+                        if let after = message.after {
+                            Button("Compare") { onCompare(before, after) }
+                                .buttonStyle(.themed(.link, size: .xs))
+                                .tooltip("Play the zooms as they were before and after this change, stacked")
+                        }
                         Button("Revert this change") { onRevert(before) }
                             .buttonStyle(.themed(.link, size: .xs))
                             .tooltip("Put the zooms back to how they were before this change")

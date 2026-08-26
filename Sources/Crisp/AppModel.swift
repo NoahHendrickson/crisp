@@ -94,6 +94,10 @@ final class AppModel: ObservableObject {
     }
     @Published var recordings: [Recording] = []
     @Published var exportProgress: [URL: Double] = [:]
+    /// Recordings open in a zoom editor window. A `Recording` is identified
+    /// by its folder URL, so renaming one that is open would strand the
+    /// editor's autosaves; `renameBlocker` refuses until it closes.
+    @Published private(set) var openEditors: Set<URL> = []
     private var exportRenderers: [URL: Renderer] = [:]
     @Published var thumbnails: [ThumbKey: CGImage] = [:]
     /// Sharper capture for the large source preview; picker thumbs stay small.
@@ -596,7 +600,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func showToast(_ message: String) {
+    func showToast(_ message: String) {
         toast = message
         toastTask?.cancel()
         toastTask = Task {
@@ -651,12 +655,30 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([recording.masterURL])
     }
 
+    func editorOpened(_ folder: URL) { openEditors.insert(folder) }
+    func editorClosed(_ folder: URL) { openEditors.remove(folder) }
+
+    /// Why `recording` can't be renamed right now, or nil when it can. Every
+    /// consumer holds the folder URL, so the move must wait until nothing
+    /// (an export writing into it, an editor autosaving to it) is using it.
+    func renameBlocker(_ recording: Recording) -> String? {
+        if exportProgress[recording.folder] != nil {
+            return "Wait for the export to finish (or cancel it) before renaming"
+        }
+        if openEditors.contains(recording.folder) {
+            return "Close this recording's zoom editor before renaming"
+        }
+        return nil
+    }
+
     /// Renames the recording folder. No-op if the name is unchanged, empty,
-    /// contains path characters, or collides with an existing folder.
+    /// contains path characters, collides with an existing folder, or the
+    /// recording is in use (see `renameBlocker`).
     func rename(_ recording: Recording, to newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != recording.name,
-              !trimmed.contains("/"), !trimmed.contains(":")
+              !trimmed.contains("/"), !trimmed.contains(":"),
+              renameBlocker(recording) == nil
         else { return }
         let dest = recording.folder.deletingLastPathComponent().appendingPathComponent(trimmed)
         guard !FileManager.default.fileExists(atPath: dest.path) else { return }
@@ -664,12 +686,6 @@ final class AppModel: ObservableObject {
             try FileManager.default.moveItem(at: recording.folder, to: dest)
         } catch {
             return
-        }
-        if let fraction = exportProgress.removeValue(forKey: recording.folder) {
-            exportProgress[dest] = fraction
-        }
-        if let renderer = exportRenderers.removeValue(forKey: recording.folder) {
-            exportRenderers[dest] = renderer
         }
         recordings = Recording.loadAll()
     }

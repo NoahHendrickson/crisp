@@ -63,6 +63,18 @@ final class Renderer {
         // fresh numbered filename so earlier exports are never overwritten.
         let outputURL = recording.nextExportURL(for: format)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: Self.fileType(for: format))
+        // Nothing that fails (or is cancelled) from here on may leave the
+        // numbered file behind: the library would list a broken export and
+        // later exports would number around it. Success is only declared once
+        // the file and its plan snapshot are both on disk.
+        var succeeded = false
+        defer {
+            if !succeeded {
+                if reader.status == .reading { reader.cancelReading() }
+                if writer.status == .writing { writer.cancelWriting() }
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+        }
         let input = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: Self.videoSettings(format: format, width: width, height: height, fps: fps)
@@ -90,11 +102,7 @@ final class Renderer {
         var pendingSample: CMSampleBuffer? = readerOutput.copyNextSampleBuffer()
 
         for frameIndex in 0..<frameCount {
-            if isCancelled {
-                reader.cancelReading()
-                writer.cancelWriting()
-                throw Cancelled()
-            }
+            if isCancelled { throw Cancelled() }
 
             let t = Double(frameIndex) / fps
 
@@ -140,6 +148,7 @@ final class Renderer {
         // Remember which zooms produced this file, so the library can compare
         // and restore versions after plan.json changes.
         Recording.savePlan(segments, to: Recording.planSnapshotURL(for: outputURL))
+        succeeded = true
         progress(1)
         return outputURL
     }
