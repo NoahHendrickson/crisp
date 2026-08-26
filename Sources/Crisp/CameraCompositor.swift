@@ -10,12 +10,12 @@ final class CameraInstruction: NSObject, AVVideoCompositionInstructionProtocol {
     let containsTweening = true
     let requiredSourceTrackIDs: [NSValue]? = nil
     let passthroughTrackID = kCMPersistentTrackID_Invalid
-    let composer: FrameComposer
+    let composer: any FrameComposing
     /// Preview renders at reduced size for smooth scrubbing (export uses the
     /// offline 10-bit Renderer instead, at full resolution).
     let renderScale: Double
 
-    init(timeRange: CMTimeRange, composer: FrameComposer, renderScale: Double) {
+    init(timeRange: CMTimeRange, composer: any FrameComposing, renderScale: Double) {
         self.timeRange = timeRange
         self.composer = composer
         self.renderScale = renderScale
@@ -79,7 +79,7 @@ final class CameraCompositor: NSObject, AVVideoCompositing {
 
     /// Build a preview composition for the master asset.
     static func makeComposition(
-        duration: CMTime, composer: FrameComposer, renderScale: Double = 0.5
+        duration: CMTime, composer: any FrameComposing, renderScale: Double = 0.5
     ) -> AVMutableVideoComposition {
         let composition = AVMutableVideoComposition()
         composition.customVideoCompositorClass = CameraCompositor.self

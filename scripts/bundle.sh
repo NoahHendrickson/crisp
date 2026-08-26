@@ -63,6 +63,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Crisp lists your Google Chrome tabs and switches to the one you pick so it can be recorded.</string>
 </dict>
 </plist>
 PLIST
@@ -73,10 +75,10 @@ PLIST
 IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development|Developer ID Application|Crisp Dev Signing/ {print $2; exit}')
 if [[ -n "$IDENTITY" ]]; then
     echo "Signing with: $IDENTITY"
-    codesign --force --options runtime --sign "$IDENTITY" "$APP"
+    codesign --force --options runtime --entitlements assets/Crisp.entitlements --sign "$IDENTITY" "$APP"
 else
     echo "Signing ad-hoc (no identity found — permission re-grant needed after each rebuild)"
-    codesign --force --sign - "$APP"
+    codesign --force --entitlements assets/Crisp.entitlements --sign - "$APP"
 fi
 
 echo "Built $APP ($BUNDLE_ID, v$VERSION)"

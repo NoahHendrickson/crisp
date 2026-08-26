@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 /// Control styles mirrored from noey-ui (button.tsx, tabs.tsx, select.tsx,
-/// progress.tsx). Tokens live in Theme.swift.
+/// progress.tsx) and the Crisp v1 Figma (43:5307). Tokens live in Theme.swift.
 
 // MARK: - Gloss (shadow-button-gloss / shadow-gloss-sm)
 
@@ -27,35 +27,8 @@ extension InsettableShape {
     }
 }
 
-/// Gradient approximation of the gloss for use over images (thumbnails),
-/// where an inner shadow can't be attached to a fill.
-struct GlossOverlay<S: InsettableShape>: View {
-    let shape: S
-    var small = false
-    var ringWidth: CGFloat = 1
-
-    var body: some View {
-        ZStack {
-            shape.fill(
-                LinearGradient(
-                    stops: [
-                        .init(color: Theme.glossTop, location: 0),
-                        .init(color: .clear, location: small ? 0.3 : 0.4),
-                        .init(color: .clear, location: 0.65),
-                        .init(color: Theme.glossBottom, location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom
-                )
-            )
-            shape.strokeBorder(Theme.glossHighlight, lineWidth: ringWidth)
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-/// The primary "glossed pill": fill, inset gloss, 1px border and the gloss
-/// highlight ring. Used by primary buttons, the active tab and the
-/// progress indicator.
+/// The blue "glossed pill": fill, inset gloss, 1px border and the gloss
+/// highlight ring. Only the editor timeline's hold bar still uses it.
 struct PrimaryChrome<S: InsettableShape>: View {
     let shape: S
     var fill: Color = Theme.primary
@@ -67,6 +40,30 @@ struct PrimaryChrome<S: InsettableShape>: View {
             .overlay(shape.inset(by: 1).fill(fill.glossed(small: small)))
             .overlay(shape.strokeBorder(border, lineWidth: 1))
             .overlay(shape.glossRing())
+    }
+}
+
+// MARK: - Raised surface (--shadow-raised)
+
+extension View {
+    /// Figma "Shadow/raised": two soft drop shadows cast to the right
+    /// (2px 0 8px black@8 + 3px 0 12px black@12). CSS blur ≈ 2× SwiftUI radius.
+    func raisedShadow() -> some View {
+        self.shadow(color: Theme.raisedShadowNear, radius: 4, x: 2, y: 0)
+            .shadow(color: Theme.raisedShadowFar, radius: 6, x: 3, y: 0)
+    }
+}
+
+/// The library's raised surface: `raised` fill, 1px `raisedBorder`, raised
+/// shadow. Used by the progress indicator.
+struct RaisedChrome<S: InsettableShape>: View {
+    let shape: S
+    var fill: Color = Theme.raised
+
+    var body: some View {
+        shape.fill(fill)
+            .overlay(shape.strokeBorder(Theme.raisedBorder, lineWidth: 1))
+            .raisedShadow()
     }
 }
 
@@ -128,8 +125,10 @@ enum ControlSizeToken {
     var horizontalPadding: CGFloat {
         switch self { case .xs: 8; case .sm: 12; case .md: 12; case .lg: 12 }
     }
-    var fontSize: CGFloat {
-        switch self { case .xs: 12; case .sm: 12.8; case .md: 14; case .lg: 14 }
+    /// Label style from the shared type ramp (Noey UI Label/12, Label/14):
+    /// compact controls use Label/12, default and large use Label/14.
+    var textStyle: Theme.TextStyle {
+        switch self { case .xs, .sm: .label12; case .md, .lg: .label14 }
     }
     /// Padding on the side that carries an icon (has-data-[icon]:pl-2 etc.).
     var iconSidePadding: CGFloat {
@@ -156,11 +155,8 @@ struct ThemedButtonStyle: ButtonStyle {
     /// Tightens the leading / trailing padding when an icon sits there.
     var leadingIcon = false
     var trailingIcon = false
-    /// Overrides the primary fill/border (e.g. red while recording).
+    /// Overrides the primary fill (e.g. the red Record button).
     var tint: Color? = nil
-    var tintBorder: Color? = nil
-    /// Overrides `size.fontSize` (e.g. 14pt on a 28pt sm button).
-    var fontSize: CGFloat? = nil
 
     func makeBody(configuration: Configuration) -> some View {
         StyledLabel(configuration: configuration, style: self)
@@ -174,23 +170,19 @@ struct ThemedButtonStyle: ButtonStyle {
 
         var body: some View {
             let shape = UnevenRoundedRectangle(
-                cornerRadii: style.corners ?? .all(Theme.radiusSm), style: .continuous
+                cornerRadii: style.corners ?? .all(Theme.radiusMd), style: .continuous
             )
             let size = style.size
             configuration.label
-                .font(Theme.font(style.fontSize ?? size.fontSize, .medium))
+                .font(Theme.font(size.textStyle))
                 .foregroundStyle(foreground)
                 .padding(.leading, style.iconOnly ? 0 : (style.leadingIcon ? size.iconSidePadding : size.horizontalPadding))
                 .padding(.trailing, style.iconOnly ? 0 : (style.trailingIcon ? size.iconSidePadding : size.horizontalPadding))
                 .frame(width: style.iconOnly ? size.height : nil, height: size.height)
                 .frame(maxWidth: style.fullWidth ? .infinity : nil)
                 .background {
-                    if style.variant == .primary {
-                        PrimaryChrome(shape: shape, fill: fill, border: borderColor)
-                    } else {
-                        shape.fill(fill)
-                            .overlay(shape.strokeBorder(borderColor, lineWidth: 1))
-                    }
+                    shape.fill(fill)
+                        .overlay(shape.strokeBorder(borderColor, lineWidth: 1))
                 }
                 .contentShape(shape)
                 .offset(y: configuration.isPressed ? 1 : 0)
@@ -200,10 +192,13 @@ struct ThemedButtonStyle: ButtonStyle {
                 .animation(.easeOut(duration: 0.12), value: hovering)
         }
 
+        // button.tsx: default is monochrome (bg-foreground text-background,
+        // hover foreground/80); outline is a --border stroke on a clear fill;
+        // secondary is a foreground/12 fill. No strokes elsewhere.
         private var fill: Color {
             switch style.variant {
-            case .primary: return (style.tint ?? Theme.primary).opacity(hovering ? 0.8 : 1)
-            case .outline: return hovering ? Theme.muted : Theme.card
+            case .primary: return (style.tint ?? Theme.foreground).opacity(hovering ? 0.8 : 1)
+            case .outline: return hovering ? Theme.outlineHover : .clear
             case .secondary: return hovering ? Theme.secondaryHover : Theme.secondary
             case .ghost: return hovering ? Theme.muted : .clear
             case .destructive: return Theme.destructive.opacity(hovering ? 0.2 : 0.1)
@@ -213,20 +208,15 @@ struct ThemedButtonStyle: ButtonStyle {
 
         private var foreground: Color {
             switch style.variant {
-            case .primary: return Theme.primaryForeground
-            case .outline, .ghost: return Theme.foreground
-            case .secondary: return Theme.secondaryForeground
+            case .primary: return style.tint == nil ? Theme.background : Theme.primaryForeground
+            case .outline, .ghost, .secondary: return Theme.foreground
             case .destructive: return Theme.destructive
             case .link: return Theme.primary
             }
         }
 
         private var borderColor: Color {
-            switch style.variant {
-            case .primary: return style.tintBorder ?? style.tint ?? Theme.primaryBorder
-            case .outline: return Theme.border
-            default: return .clear
-            }
+            style.variant == .outline ? Theme.border : .clear
         }
     }
 }
@@ -240,22 +230,36 @@ extension ButtonStyle where Self == ThemedButtonStyle {
         corners: RectangleCornerRadii? = nil,
         leadingIcon: Bool = false,
         trailingIcon: Bool = false,
-        tint: Color? = nil,
-        tintBorder: Color? = nil,
-        fontSize: CGFloat? = nil
+        tint: Color? = nil
     ) -> ThemedButtonStyle {
         ThemedButtonStyle(
             variant: variant, size: size, iconOnly: iconOnly, fullWidth: fullWidth,
             corners: corners, leadingIcon: leadingIcon, trailingIcon: trailingIcon,
-            tint: tint, tintBorder: tintBorder, fontSize: fontSize
+            tint: tint
         )
+    }
+}
+
+/// 1px join between Button Group/Split halves (Figma 49:7567): `--input`
+/// over the fill, inset 2pt from the top and bottom of the button.
+struct ButtonGroupSeparator: View {
+    var height: CGFloat
+
+    var body: some View {
+        Rectangle()
+            .fill(Theme.input)
+            .frame(width: 1, height: max(0, height - 4))
+            .zIndex(1)
     }
 }
 
 // MARK: - Tabs (tabs.tsx, variant=default)
 
-/// Muted track with pill triggers; the active tab uses the primary button
-/// treatment with the small gloss. A single pill slides between tabs.
+/// Noey UI "Tabs List" (54:372 light / 54:393 dark; tabs.tsx variant=default):
+/// a flush muted track (black@8 / white@12, rounded 6, no stroke) of 32pt
+/// triggers (px 12, Label/12) that share the width equally (flex-1). The
+/// active tab is a raised pill (paper + foreground@12 hairline in light,
+/// white@24 with no border in dark, Shadow/raised) that slides between them.
 struct TabsPicker<Item: Identifiable & Hashable>: View {
     let items: [Item]
     @Binding var selection: Item
@@ -263,46 +267,58 @@ struct TabsPicker<Item: Identifiable & Hashable>: View {
     @State private var frames: [AnyHashable: CGRect] = [:]
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
         HStack(spacing: 0) {
             ForEach(items) { item in
-                let active = item == selection
-                Button { selection = item } label: {
-                    Text(label(item))
-                        .font(Theme.font(14, .medium))
-                        .foregroundStyle(active ? Theme.primaryForeground : Theme.mutedForeground)
-                        .padding(.horizontal, 12)
-                        .frame(height: 32)
-                        .background {
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: TabFramePreference.self,
-                                    value: [AnyHashable(item.id): geo.frame(in: .named("tabs"))]
-                                )
-                            }
-                        }
-                        .contentShape(Rectangle())
+                TabTrigger(title: label(item), active: item == selection) {
+                    selection = item
                 }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
+                .background {
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: TabFramePreference.self,
+                            value: [AnyHashable(item.id): geo.frame(in: .named("tabs"))]
+                        )
+                    }
+                }
             }
         }
         .coordinateSpace(name: "tabs")
         .onPreferenceChange(TabFramePreference.self) { frames = $0 }
         .background(alignment: .topLeading) {
             if let frame = frames[AnyHashable(selection.id)] {
-                PrimaryChrome(
-                    shape: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous),
-                    small: true
-                )
+                shape.fill(Theme.tabsActive)
+                    .overlay(shape.strokeBorder(Theme.tabsActiveBorder, lineWidth: 1))
+                    .raisedShadow()
                     .frame(width: frame.width, height: frame.height)
                     .offset(x: frame.minX, y: frame.minY)
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
-                .fill(Theme.tabsTrack)
-        )
+        .background(shape.fill(Theme.tabsList))
+        .clipShape(shape)
         .animation(.smooth(duration: 0.22), value: selection)
+    }
+
+    private struct TabTrigger: View {
+        let title: String
+        let active: Bool
+        let action: () -> Void
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                Text(title)
+                    .font(Theme.font(.label12))
+                    .foregroundStyle(active || hovering ? Theme.foreground : Theme.mutedForeground)
+                    .padding(.horizontal, ControlSizeToken.md.horizontalPadding)   // px-3
+                    .frame(maxWidth: .infinity)                                   // flex-1
+                    .frame(height: ControlSizeToken.md.height)                    // h-8
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .onHover { hovering = $0 }
+        }
     }
 }
 
@@ -313,32 +329,108 @@ private struct TabFramePreference: PreferenceKey {
     }
 }
 
-// MARK: - Select trigger (select.tsx, size=lg)
-
-/// Label for a `Menu` styled like the library's SelectTrigger.
-struct SelectTriggerLabel: View {
-    let text: String
+/// Noey UI "IconTabList" (Figma 174:925): a 32pt track of 32×32 icon tabs
+/// (radius 8). The active tab is paper with a 1px track-colored hairline;
+/// inactive tabs are transparent. Icons are 16pt, foreground when active
+/// and text-secondary otherwise.
+struct IconTabsPicker<Item: Identifiable & Hashable>: View {
+    let items: [Item]
+    @Binding var selection: Item
+    let icon: (Item) -> String
+    let fallback: (Item) -> String
+    let label: (Item) -> String
+    @State private var frames: [AnyHashable: CGRect] = [:]
 
     var body: some View {
-        HStack(spacing: 6) {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+        HStack(spacing: 0) {
+            ForEach(items) { item in
+                IconTabTrigger(
+                    name: icon(item),
+                    fallback: fallback(item),
+                    label: label(item),
+                    active: item == selection
+                ) {
+                    selection = item
+                }
+                .background {
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: TabFramePreference.self,
+                            value: [AnyHashable(item.id): geo.frame(in: .named("icon-tabs"))]
+                        )
+                    }
+                }
+            }
+        }
+        .coordinateSpace(name: "icon-tabs")
+        .onPreferenceChange(TabFramePreference.self) { frames = $0 }
+        .background(alignment: .topLeading) {
+            if let frame = frames[AnyHashable(selection.id)] {
+                shape.fill(Theme.background)
+                    .overlay(shape.strokeBorder(Theme.iconTabsList, lineWidth: 1))
+                    .frame(width: frame.width, height: frame.height)
+                    .offset(x: frame.minX, y: frame.minY)
+            }
+        }
+        .background(shape.fill(Theme.iconTabsList))
+        .clipShape(shape)
+        .animation(.smooth(duration: 0.22), value: selection)
+    }
+
+    private struct IconTabTrigger: View {
+        let name: String
+        let fallback: String
+        let label: String
+        let active: Bool
+        let action: () -> Void
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                Icon(name: name, size: 16, fallback: fallback)
+                    .foregroundStyle(active || hovering ? Theme.foreground : Theme.textSecondary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .tooltip(label)
+            .accessibilityLabel(label)
+            .onHover { hovering = $0 }
+        }
+    }
+}
+
+// MARK: - Select trigger (select.tsx)
+
+/// Label for a `Menu` styled like the library's SelectTrigger (Figma 158:1043).
+/// Default is LG (h36, Body/14, CaretUpDown) to match Button lg.
+struct SelectTriggerLabel: View {
+    let text: String
+    var size: ControlSizeToken = .lg
+    var maxTextWidth: CGFloat? = nil
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
+        HStack(spacing: size.gap) {
             Text(text)
-                .font(Theme.font(14))
+                .font(Theme.font(size.height >= 32 ? .body14 : .body12))
                 .foregroundStyle(Theme.foreground)
-            Icon(name: "caret-down", size: 16, fallback: "chevron.down")
+                .lineLimit(1)
+                .frame(maxWidth: maxTextWidth ?? .infinity, alignment: .leading)
+            Icon(name: "caret-up-down", size: size.iconSize, fallback: "chevron.up.chevron.down")
                 .foregroundStyle(Theme.mutedForeground)
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 8)
-        .frame(height: 36)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
-                .fill(Theme.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
-                .strokeBorder(Theme.input, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
+        .padding(.leading, size.horizontalPadding)
+        .padding(.trailing, size.iconSidePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: size.height)
+        .background {
+            shape.fill(Theme.iconTabsList)
+                .overlay(shape.strokeBorder(Theme.input, lineWidth: 1))
+        }
+        .contentShape(shape)
         .pointingHandCursor()
     }
 }
@@ -349,7 +441,7 @@ struct CardGroupBoxStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             configuration.label
-                .font(Theme.font(14, .medium))
+                .font(Theme.font(.label12))
                 .foregroundStyle(Theme.foreground)
             configuration.content
         }
@@ -369,26 +461,70 @@ extension GroupBoxStyle where Self == CardGroupBoxStyle {
     static var card: CardGroupBoxStyle { CardGroupBoxStyle() }
 }
 
-// MARK: - Progress (progress.tsx + Figma 23:599)
+// MARK: - Progress (progress.tsx + Figma 43:5350)
 
-/// 8pt track, 2pt corners. Indicator is primary + primary-border + small gloss.
+/// 8pt pill track with a 1px border; the indicator is the raised surface
+/// with a foreground/80 fill (per the Crisp screen), inset 1pt.
 struct ThemedProgress: View {
     var fraction: Double
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 2, style: .continuous)
+        let shape = Capsule(style: .continuous)
         GeometryReader { geo in
-            let width = geo.size.width * CGFloat(min(max(fraction, 0), 1))
+            let inner = max(0, geo.size.width - 2)
+            let width = inner * CGFloat(min(max(fraction, 0), 1))
             ZStack(alignment: .leading) {
-                shape.fill(Theme.tabsTrack)
+                shape.fill(Theme.track)
+                    .overlay(shape.strokeBorder(Theme.trackBorder, lineWidth: 1))
                 if width > 0 {
-                    PrimaryChrome(shape: shape, small: true)
-                        .frame(width: width)
+                    RaisedChrome(shape: shape, fill: Theme.foreground.opacity(0.8))
+                        .frame(width: width, height: 6)
+                        .offset(x: 1)
                 }
             }
+            .clipShape(shape)
         }
         .frame(height: 8)
         .accessibilityValue("\(Int((min(max(fraction, 0), 1)) * 100)) percent")
+    }
+}
+
+/// Slider whose track is `ThemedProgress` (8pt, 2pt corners, primary gloss).
+struct ThemedSlider: View {
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+
+    init(value: Binding<Double>, in range: ClosedRange<Double>) {
+        self._value = value
+        self.range = range
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = max(geo.size.width, 1)
+            let span = range.upperBound - range.lowerBound
+            let t = span > 0 ? (value - range.lowerBound) / span : 0
+            let clamped = min(max(t, 0), 1)
+            ZStack(alignment: .leading) {
+                ThemedProgress(fraction: clamped)
+                Circle()
+                    .fill(Theme.background)
+                    .overlay(Circle().strokeBorder(Theme.foreground, lineWidth: 1))
+                    .frame(width: 12, height: 12)
+                    .offset(x: CGFloat(clamped) * (w - 12))
+            }
+            .frame(width: w, height: 16)
+            .contentShape(Rectangle())
+            .pointingHandCursor()
+            .gesture(
+                DragGesture(minimumDistance: 0).onChanged { g in
+                    let p = min(max(g.location.x / w, 0), 1)
+                    value = range.lowerBound + p * span
+                }
+            )
+        }
+        .frame(height: 16)
+        .accessibilityValue(Text(String(format: "%.2f", value)))
     }
 }
 
@@ -396,24 +532,53 @@ struct ThemedProgress: View {
 /// Shared by the recordings list and the editor toolbar.
 struct ExportProgressControls: View {
     var fraction: Double
-    var onCancel: () -> Void
     var width: CGFloat? = nil
+    /// Cancel button size: `.sm` in the editor toolbar, `.md` in the library
+    /// sidebar (Figma 76:12347).
+    var size: ControlSizeToken = .sm
+    /// Library cancel is an X on a ghost 32pt button; the editor keeps outline + stop.
+    var cancelIcon: String = "stop-duotone"
+    var cancelVariant: ButtonVariant = .outline
+    var onCancel: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             ThemedProgress(fraction: fraction)
             Text("\(Int(fraction * 100))%")
-                .font(Theme.font(11, .medium))
+                .font(Theme.font(.label12))
                 .monospacedDigit()
                 .foregroundStyle(Theme.foreground)
                 .frame(width: 28)
             Button(action: onCancel) {
-                Icon(name: "stop-fill", size: 16, fallback: "stop.fill")
-                    .foregroundStyle(Theme.destructive)
+                Icon(name: cancelIcon, size: size == .xs ? 12 : 16, fallback: "xmark")
             }
-            .buttonStyle(.themed(.outline, size: .sm, iconOnly: true))
-            .help("Cancel export")
+            .buttonStyle(.themed(cancelVariant, size: size, iconOnly: true))
+            .tooltip("Cancel export")
         }
         .frame(width: width)
+    }
+}
+
+// MARK: - Hatch
+
+/// Diagonal stripes used on the timeline to mark automatic (non-editable)
+/// camera phases. Draws over the view's frame; clip to shape as needed.
+struct Hatch: View {
+    var color: Color
+    var spacing: CGFloat = 7
+    var lineWidth: CGFloat = 2
+
+    var body: some View {
+        Canvas { ctx, size in
+            var path = Path()
+            let span = size.width + size.height
+            var offset: CGFloat = -size.height
+            while offset < span {
+                path.move(to: CGPoint(x: offset, y: size.height))
+                path.addLine(to: CGPoint(x: offset + size.height, y: 0))
+                offset += spacing
+            }
+            ctx.stroke(path, with: .color(color), lineWidth: lineWidth)
+        }
     }
 }

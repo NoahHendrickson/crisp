@@ -48,27 +48,74 @@ struct EditorView: View {
     let folder: URL
 
     @EnvironmentObject var model: AppModel
-    @State private var meta: RecordingMeta?
-    @State private var duration: Double = 1
+    @State var meta: RecordingMeta?
+    @State var duration: Double = 1
     enum Selection: Equatable {
         case segment(UUID)
         case pan(segment: UUID, pan: UUID)
     }
 
-    @State private var segments: [ZoomSegment] = []
-    @State private var selection: Selection?
-    @State private var player = AVPlayer()
-    @State private var currentTime: Double = 0
-    @State private var timeObserver: Any?
-    @State private var loadError: String?
-    @State private var rebuildTask: Task<Void, Never>?
+    @State var segments: [ZoomSegment] = []
+    @State var selection: Selection?
+    /// The hold edge being dragged on the timeline, with the time it had when
+    /// the drag began so the edge tracks the pointer instead of jumping to it.
+    struct EdgeDrag: Equatable {
+        let id: UUID
+        let edge: HorizontalEdge
+        let origin: Double
+    }
+    @State var edgeDrag: EdgeDrag?
+    @State var player = AVPlayer()
+    @State var currentTime: Double = 0
+    @State var timeObserver: Any?
+    @State var loadError: String?
+    @State var rebuildTask: Task<Void, Never>?
+    /// What the preview shows (the IconTabList above the timeline): the real
+    /// zoomed camera, or the full frame with an editable crop box.
+    enum ViewMode: String, CaseIterable, Identifiable {
+        case preview, box
+        var id: String { rawValue }
+    }
+    @State var viewMode: ViewMode = .preview
+    /// Plan the split "Compare" preview plays against: the plan as loaded, or
+    /// the one in effect before the last AI reply / revert / reset.
+    @State var compareBaseline: [ZoomSegment]?
+    /// What the baseline is compared with while comparing: a specific plan
+    /// (the result of one AI reply) or, when nil, the live `segments`.
+    @State var compareTarget: [ZoomSegment]?
+    /// True while the preview shows baseline (top) and current (bottom)
+    /// stacked, looping over the zooms that differ.
+    @State var comparing = false
+    /// Where the working plan was last loaded from, with the plan it loaded.
+    /// The "Start from" check mark stays on a source only while `segments`
+    /// still equals that plan; any edit makes it simply "Current plan".
+    enum PlanSource: Equatable {
+        case current
+        case auto(loaded: [ZoomSegment])
+        case export(URL, loaded: [ZoomSegment])
 
-    @StateObject private var aiChat = AIChat()
-    @State private var showAIPanel = false
+        var isAuto: Bool {
+            if case .auto = self { return true } else { return false }
+        }
+        var exportURL: URL? {
+            if case .export(let url, _) = self { return url } else { return nil }
+        }
+    }
+    @State var planSource: PlanSource = .current
 
-    private var recording: Recording { Recording(folder: folder) }
-    private let baseMinWidth: CGFloat = 880
-    private let panelSpacing: CGFloat = 14
+    @StateObject var aiChat = AIChat()
+    @State var showAIPanel = false
+    @State private var windowHandle = EditorWindowHandle()
+    /// How far the window is currently grown below its natural height for
+    /// the inspector and/or the compare view (see `syncWindowGrowth`).
+    @State var windowGrown: CGFloat = 0
+
+    var recording: Recording { Recording(folder: folder) }
+    let baseMinWidth: CGFloat = 880
+    /// Room for the zoom/pan GroupBox plus the VStack gap above it.
+    static let inspectorExpansion: CGFloat = 260
+    /// Extra height so each half of the stacked compare view stays usable.
+    static let compareExpansion: CGFloat = 220
 
     var body: some View {
         Group {
@@ -77,20 +124,25 @@ struct EditorView: View {
                     .foregroundStyle(.red)
                     .padding()
             } else {
-                HStack(spacing: panelSpacing) {
-                    VStack(spacing: 12) {
+                HStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 24) {
                         PlayerLayerView(player: player)
                             .frame(minHeight: 300)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(Color.black)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        // Plan edits are locked while a turn is in flight so the
-                        // agent's reply can't clobber them.
-                        timeline
-                            .disabled(aiChat.running)
-                        inspector
-                            .disabled(aiChat.running)
-                        controls
+                            .overlay { frameOverlay.disabled(aiChat.running) }
+                            .overlay { if comparing { compareLabels } }
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous))
+                        VStack(alignment: .leading, spacing: 32) {
+                            // Plan edits are locked while a turn is in flight so the
+                            // agent's reply can't clobber them.
+                            timeline
+                            controls
+                            inspector
+                                .disabled(aiChat.running)
+                        }
                     }
+                    .padding(24)
                     if showAIPanel {
                         AIPanelView(
                             chat: aiChat,
@@ -99,41 +151,71 @@ struct EditorView: View {
                             duration: duration,
                             segments: segments,
                             onApply: { plan in
+                                // A historical Compare must not outlive the plan it
+                                // was comparing; from here on compare shows the plan
+                                // this apply replaced vs. the live segments.
+                                compareTarget = nil
+                                compareBaseline = segments
                                 segments = plan
-                                selection = nil
+                                select(nil)
                             },
-                            onClose: { withAnimation { showAIPanel = false } }
+                            onCompare: { before, after in
+                                compareBaseline = before
+                                compareTarget = after
+                                setComparing(true)
+                            }
                         )
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .padding(14)
             }
         }
-        .font(Theme.font(14))
+        .font(Theme.font(.body12))
         .foregroundStyle(Theme.foreground)
         .groupBoxStyle(.card)
-        .frame(minWidth: showAIPanel ? baseMinWidth + panelSpacing + AIPanelView.width : baseMinWidth, minHeight: 660)
+        .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 660)
         .background(Theme.background)
         .background(WindowChrome())
-        .navigationTitle("Zoom Editor — \(recording.name)")
+        .background(EditorWindowHandleView(handle: windowHandle))
+        .tooltipHost()
+        .dropdownHost()
+        .navigationTitle("Crisp zoom editor – \(recording.name)")
         .onAppear {
+            model.editorOpened(folder)
             load()
             Task { await aiChat.detectProviders() }
         }
         .onDisappear {
+            model.editorClosed(folder)
             if let timeObserver { player.removeTimeObserver(timeObserver) }
             timeObserver = nil
             player.pause()
         }
         .onChange(of: segments) { _, _ in
+            if comparing && planDiff == nil { setComparing(false) }
             scheduleRebuild()
+        }
+        .onChange(of: selection) { _, _ in
+            player.currentItem?.videoComposition = makeComposition()
+        }
+        .onChange(of: viewMode) { _, _ in
+            if comparing { setComparing(false) }
+            player.currentItem?.videoComposition = makeComposition()
+        }
+        .onReceive(player.publisher(for: \.timeControlStatus)) { status in
+            // Compare playback that ran into the end of the master wraps
+            // around to the first edited window instead of stopping.
+            if status == .paused && comparing && currentTime >= duration - 0.1,
+               let first = planDiff?.ranges.first {
+                seek(to: first.start)
+                player.play()
+            }
         }
     }
 
     // MARK: - Loading
 
-    private func load() {
+    func load() {
         do {
             let m = try recording.loadMeta()
             meta = m
@@ -146,6 +228,7 @@ struct EditorView: View {
                 let asset = AVURLAsset(url: recording.masterURL)
                 duration = try await asset.load(.duration).seconds
                 segments = recording.loadPlanSegments() ?? autoSegments()
+                compareBaseline = segments
                 let item = AVPlayerItem(asset: asset)
                 item.videoComposition = makeComposition()
                 player.replaceCurrentItem(with: item)
@@ -153,6 +236,7 @@ struct EditorView: View {
                     forInterval: CMTime(value: 1, timescale: 30), queue: .main
                 ) { time in
                     currentTime = time.seconds
+                    enforceCompareLoop()
                 }
             } catch {
                 loadError = "Could not load the master video: \(error.localizedDescription)"
@@ -160,28 +244,101 @@ struct EditorView: View {
         }
     }
 
-    private func planner() -> ZoomPlanner {
-        guard let meta else { return ZoomPlanner(width: 1, height: 1) }
-        return ZoomPlanner(width: Double(meta.pixelWidth), height: Double(meta.pixelHeight))
-    }
+    // MARK: - Compare
 
-    private func autoSegments() -> [ZoomSegment] {
-        guard let meta else { return [] }
-        return planner().segments(events: meta.events, duration: duration)
-    }
-
-    private func makeComposition() -> AVMutableVideoComposition? {
-        guard let meta else { return nil }
-        let keys = planner().keyframes(from: segments, duration: duration)
-        let composer = FrameComposer(meta: meta, keys: keys)
-        return CameraCompositor.makeComposition(
-            duration: CMTime(seconds: max(duration, 0.1), preferredTimescale: 600),
-            composer: composer
+    /// Differences between the baseline and the current plan, or nil when
+    /// there is nothing to compare.
+    var planDiff: PlanDiff? {
+        guard let compareBaseline else { return nil }
+        let diff = PlanDiff(
+            before: compareBaseline, after: compareTarget ?? segments,
+            planner: planner(), duration: duration
         )
+        return diff.isEmpty ? nil : diff
+    }
+
+    /// The window is grown below its natural height while the inspector
+    /// and/or the compare view are showing, so the preview and timeline stay
+    /// put. The target height is derived from state; only the delta since
+    /// the last sync is applied.
+    func syncWindowGrowth() {
+        let wanted = (selection != nil ? Self.inspectorExpansion : 0)
+            + (comparing ? Self.compareExpansion : 0)
+        windowHandle.growDown(by: wanted - windowGrown)
+        windowGrown = wanted
+    }
+
+    /// Enter/leave the stacked before/after preview. Entering clears any
+    /// selection (the crop box has no meaning across two plans), grows the
+    /// window so each half keeps a usable size, and starts playing from the
+    /// first edited window.
+    func setComparing(_ on: Bool) {
+        guard on != comparing else { return }
+        if on {
+            select(nil)
+            comparing = true
+            syncWindowGrowth()
+            player.currentItem?.videoComposition = makeComposition()
+            if let first = planDiff?.ranges.first { seek(to: first.start) }
+            player.play()
+        } else {
+            comparing = false
+            compareTarget = nil
+            syncWindowGrowth()
+            player.currentItem?.videoComposition = makeComposition()
+        }
+    }
+
+    /// While comparing, playback stays inside the edited windows: reaching the
+    /// end of one (or scrubbing into unchanged footage) jumps to the next,
+    /// wrapping to the first.
+    func enforceCompareLoop() {
+        guard comparing, player.timeControlStatus == .playing,
+              let ranges = planDiff?.ranges, !ranges.isEmpty else { return }
+        let t = currentTime
+        if ranges.contains(where: { t >= $0.start - 0.05 && t < $0.end - 0.03 }) { return }
+        let next = ranges.first { $0.start > t } ?? ranges[0]
+        seek(to: next.start)
+    }
+
+    /// "Before" / "After" tags pinned to the top-left of each stacked half,
+    /// positioned against the aspect-fitted video rect.
+    var compareLabels: some View {
+        GeometryReader { geo in
+            if let meta {
+                let w = Double(meta.pixelWidth)
+                let h = Double(meta.pixelHeight)
+                let stackedH = h * 2 + CompareComposer.gap
+                let scale = min(geo.size.width / w, geo.size.height / stackedH)
+                let fitted = CGRect(
+                    x: (geo.size.width - w * scale) / 2,
+                    y: (geo.size.height - stackedH * scale) / 2,
+                    width: w * scale, height: stackedH * scale
+                )
+                let secondY = fitted.minY + (h + CompareComposer.gap) * scale
+                compareTag("Before")
+                    .offset(x: fitted.minX + 8, y: fitted.minY + 8)
+                compareTag("After")
+                    .offset(x: fitted.minX + 8, y: secondY + 8)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    func compareTag(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.font(.label12))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
+                    .fill(Color.black.opacity(0.55))
+            )
     }
 
     /// Debounced: autosave the plan and swap in a fresh preview composition.
-    private func scheduleRebuild() {
+    func scheduleRebuild() {
         rebuildTask?.cancel()
         rebuildTask = Task {
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -191,426 +348,193 @@ struct EditorView: View {
         }
     }
 
-    // MARK: - Timeline
+    // MARK: - Frame overlay
 
-    /// True when this segment or one of its pans is selected.
-    private func isHighlighted(_ seg: ZoomSegment) -> Bool {
-        switch selection {
-        case .segment(seg.id): return true
-        case .pan(segment: seg.id, pan: _): return true
-        default: return false
-        }
-    }
+    static let zoomRange: ClosedRange<Double> = 1.2...3.0
 
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            markerLane
-            GeometryReader { geo in
-                let w = geo.size.width
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Theme.tabsTrack)
-                        .frame(height: 30)
-                    ForEach(segments) { seg in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(isHighlighted(seg)
-                                  ? Theme.primary
-                                  : Theme.primary.opacity(0.45))
-                            .frame(
-                                width: max(6, (seg.end - seg.start) / duration * w),
-                                height: 30
-                            )
-                            .offset(x: seg.start / duration * w)
-                        // Tick where each pan lands inside the block.
-                        ForEach(seg.pans) { pan in
-                            Rectangle()
-                                .fill(Color.white.opacity(0.8))
-                                .frame(width: 2, height: 30)
-                                .offset(x: min(max(0, pan.t / duration * w), w - 2))
-                        }
-                    }
-                    Rectangle()
-                        .fill(Theme.destructive)
-                        .frame(width: 2, height: 38)
-                        .offset(x: min(max(0, currentTime / duration * w), w - 2), y: -4)
-                }
-                .contentShape(Rectangle())
-                .pointingHandCursor()
-                .gesture(
-                    DragGesture(minimumDistance: 0).onChanged { value in
-                        let t = min(max(0, value.location.x / w * duration), duration)
-                        seek(to: t)
-                        selection = segments
-                            .first { t >= $0.start && t <= $0.end }
-                            .map { .segment($0.id) }
-                    }
-                )
-            }
-            .frame(height: 38)
-            HStack {
-                Text(timecode(currentTime))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("Drag the bar to scrub · 🔍 selects a zoom · → selects a pan")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text(timecode(duration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// Icon lane above the bar: a magnifier where each zoom-in starts, an
-    /// arrow where each pan starts. Clicking selects for editing.
-    private var markerLane: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            ZStack(alignment: .topLeading) {
-                ForEach(segments) { seg in
-                    timelineMarker(
-                        systemImage: "plus.magnifyingglass",
-                        selected: selection == .segment(seg.id),
-                        x: min(max(0, seg.start / duration * w - 7), w - 14)
-                    ) {
-                        selection = .segment(seg.id)
-                        seek(to: seg.start)
-                    }
-                    ForEach(seg.pans) { pan in
-                        timelineMarker(
-                            systemImage: "arrow.right.circle.fill",
-                            selected: selection == .pan(segment: seg.id, pan: pan.id),
-                            x: min(max(0, pan.t / duration * w - 7), w - 14)
-                        ) {
-                            selection = .pan(segment: seg.id, pan: pan.id)
-                            seek(to: pan.t)
-                        }
-                    }
-                }
-            }
-        }
-        .frame(height: 18)
-    }
-
-    private func timelineMarker(
-        systemImage: String, selected: Bool, x: Double, action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(selected ? Theme.primary : Theme.mutedForeground)
-        }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
-        .offset(x: x)
-        .help(systemImage.hasPrefix("plus") ? "Zoom start — click to edit" : "Pan start — click to edit")
-    }
-
-    // MARK: - Inspector
-
-    private var selectedSegmentIndex: Int? {
-        switch selection {
-        case .segment(let id), .pan(segment: let id, pan: _):
-            return segments.firstIndex { $0.id == id }
-        case nil:
-            return nil
-        }
-    }
-
+    /// Editable crop box, shown in the box view for the selected zoom or pan
+    /// — or, with nothing selected, for the zoom under the playhead.
     @ViewBuilder
-    private var inspector: some View {
-        if case .pan(let segID, let panID) = selection,
-           let segIndex = segments.firstIndex(where: { $0.id == segID }),
-           let panIndex = segments[segIndex].pans.firstIndex(where: { $0.id == panID }),
-           let meta {
-            panInspector(segIndex: segIndex, panIndex: panIndex, meta: meta)
-        } else if let index = selectedSegmentIndex, let meta {
-            let seg = segments[index]
-            GroupBox {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                    GridRow {
-                        Text("Start")
-                        Slider(
-                            value: Binding(
-                                get: { segments[index].start },
-                                set: { segments[index].start = min($0, segments[index].end - 0.2) }
-                            ),
-                            in: 0...duration
-                        )
-                        Text(timecode(seg.start))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("End")
-                        Slider(
-                            value: Binding(
-                                get: { segments[index].end },
-                                set: { segments[index].end = max($0, segments[index].start + 0.2) }
-                            ),
-                            in: 0...duration
-                        )
-                        Text(timecode(seg.end))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Zoom")
-                        Slider(
-                            value: Binding(
-                                get: { segments[index].zoom },
-                                set: { segments[index].zoom = $0 }
-                            ),
-                            in: 1.2...3.0
-                        )
-                        Text(String(format: "%.1f×", seg.zoom))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Center X")
-                        Slider(
-                            value: Binding(
-                                get: { segments[index].cx },
-                                set: { segments[index].cx = $0 }
-                            ),
-                            in: 0...Double(meta.pixelWidth)
-                        )
-                        Text("\(Int(seg.cx))px")
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Center Y")
-                        Slider(
-                            value: Binding(
-                                get: { segments[index].cy },
-                                set: { segments[index].cy = $0 }
-                            ),
-                            in: 0...Double(meta.pixelHeight)
-                        )
-                        Text("\(Int(seg.cy))px")
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                }
-                HStack {
-                    Button("Preview This Zoom") {
-                        seek(to: max(0, seg.start - 1.2))
-                        player.play()
-                    }
-                    .buttonStyle(.themed(.outline, size: .sm))
-                    Button("Add Pan at Playhead") {
-                        addPanAtPlayhead(segIndex: index)
-                    }
-                    .buttonStyle(.themed(.outline, size: .sm))
-                    .help("Insert a camera pan inside this zoom at the current playhead")
-                    Spacer()
-                    Button("Remove Zoom", role: .destructive) {
-                        segments.remove(at: index)
-                        selection = nil
-                    }
-                    .buttonStyle(.themed(.destructive, size: .sm))
-                }
-                .padding(.top, 4)
-            } label: {
-                Text("Selected Zoom")
-                    .font(.callout.weight(.medium))
-            }
-        } else {
-            Text("Scrub to a zoom on the timeline to select and edit it, or add one at the playhead. Click 🔍/→ markers to edit zooms and pans.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
+    var frameOverlay: some View {
+        if let meta, viewMode == .box, !comparing, let target = boxTarget {
+            ZoomFrameOverlay(
+                pixelWidth: Double(meta.pixelWidth),
+                pixelHeight: Double(meta.pixelHeight),
+                zoomRange: Self.zoomRange,
+                zoomEditable: target.editable,
+                editable: target.editable,
+                cx: target.cx,
+                cy: target.cy,
+                zoom: target.zoom
+            )
         }
     }
 
-    private func panInspector(segIndex: Int, panIndex: Int, meta: RecordingMeta) -> some View {
-        let seg = segments[segIndex]
-        let pan = seg.pans[panIndex]
-        return GroupBox {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text("Starts at")
-                    Slider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].t },
-                            set: { segments[segIndex].pans[panIndex].t = $0 }
-                        ),
-                        in: seg.start...max(seg.start + 0.1, seg.end - 0.1)
-                    )
-                    Text(timecode(pan.t))
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Travel time")
-                    Slider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].duration },
-                            set: { segments[segIndex].pans[panIndex].duration = $0 }
-                        ),
-                        in: 0.15...1.5
-                    )
-                    Text(String(format: "%.2fs", pan.duration))
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Pan to X")
-                    Slider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].cx },
-                            set: { segments[segIndex].pans[panIndex].cx = $0 }
-                        ),
-                        in: 0...Double(meta.pixelWidth)
-                    )
-                    Text("\(Int(pan.cx))px")
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Pan to Y")
-                    Slider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].cy },
-                            set: { segments[segIndex].pans[panIndex].cy = $0 }
-                        ),
-                        in: 0...Double(meta.pixelHeight)
-                    )
-                    Text("\(Int(pan.cy))px")
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-            }
-            HStack {
-                Button("Preview This Pan") {
-                    seek(to: max(0, pan.t - 1.0))
-                    player.play()
-                }
-                .buttonStyle(.themed(.outline, size: .sm))
-                Spacer()
-                Button("Remove Pan", role: .destructive) {
-                    segments[segIndex].pans.remove(at: panIndex)
-                    selection = .segment(seg.id)
-                }
-                .buttonStyle(.themed(.destructive, size: .sm))
-            }
-            .padding(.top, 4)
-        } label: {
-            Text("Selected Pan (in zoom \(timecode(seg.start))–\(timecode(seg.end)))")
-                .font(.callout.weight(.medium))
-        }
+    /// What the crop box shows and edits.
+    struct BoxTarget {
+        var cx: Binding<Double>
+        var cy: Binding<Double>
+        var zoom: Binding<Double>
+        var editable: Bool
     }
 
-    private func addPanAtPlayhead(segIndex: Int) {
-        guard let meta else { return }
-        let seg = segments[segIndex]
-        let t = min(max(currentTime, seg.start), max(seg.start, seg.end - 0.2))
-        // Aim at wherever the cursor was shortly after the pan begins.
-        let p = FrameComposer.cursorPosition(samples: meta.samples, at: t + 0.4)
-        let pan = PanMove(
-            t: t, duration: 0.5,
-            cx: p?.x ?? Double(meta.pixelWidth) / 2,
-            cy: p?.y ?? Double(meta.pixelHeight) / 2
+    /// Resolve the crop box from the playhead and selection. Outside the
+    /// zoom's hold it only mirrors where the camera really is (full frame, or
+    /// the in-between framing mid-ramp). Inside, it edits the selected pan,
+    /// else the latest pan that has started, else the zoom's own framing;
+    /// resizing the box at a pan gives that move its own zoom level.
+    var boxTarget: BoxTarget? {
+        guard let index = boxSegmentIndex else { return nil }
+        let seg = segments[index]
+        let span = motionSpan(for: seg)
+        if currentTime < span.arrive || currentTime > span.end {
+            let camera = ZoomPlanner.evaluate(
+                planner().keyframes(from: segments, duration: duration),
+                at: currentTime
+            )
+            return BoxTarget(
+                cx: .constant(camera.center.x), cy: .constant(camera.center.y),
+                zoom: .constant(camera.zoom), editable: false
+            )
+        }
+        var panIndex = activePanIndex(in: seg)
+        if case .pan(_, let panID) = selection,
+           let selected = seg.pans.firstIndex(where: { $0.id == panID }) {
+            panIndex = selected
+        }
+        if let panIndex {
+            return BoxTarget(
+                cx: $segments[index].pans[panIndex].cx,
+                cy: $segments[index].pans[panIndex].cy,
+                zoom: panZoomBinding(segIndex: index, panIndex: panIndex),
+                editable: true
+            )
+        }
+        return BoxTarget(
+            cx: $segments[index].cx, cy: $segments[index].cy,
+            zoom: $segments[index].zoom, editable: true
         )
-        segments[segIndex].pans.append(pan)
-        selection = .pan(segment: seg.id, pan: pan.id)
     }
 
-    // MARK: - Controls
-
-    private var isPlaying: Bool {
-        player.timeControlStatus == .playing
-    }
-
-    private var controls: some View {
-        HStack(spacing: 12) {
-            Button {
-                if isPlaying {
-                    player.pause()
-                } else {
-                    if duration - currentTime < 0.05 { seek(to: 0) }
-                    player.play()
-                }
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-            }
-            .buttonStyle(.themed(.outline, iconOnly: true))
-            .keyboardShortcut(.space, modifiers: [])
-            .help("Play / pause (Space)")
-            Button("Add Zoom at Playhead") {
-                addZoomAtPlayhead()
-            }
-            .buttonStyle(.themed(.outline))
-            .disabled(aiChat.running)
-            Button("Revert to Auto") {
-                try? FileManager.default.removeItem(at: recording.planURL)
-                segments = autoSegments()
-                selection = nil
-            }
-            .buttonStyle(.themed(.ghost))
-            .disabled(aiChat.running)
-            .help("Discard edits and regenerate zooms from the click log")
-            Button {
-                withAnimation { showAIPanel.toggle() }
-            } label: {
-                if aiChat.running {
-                    Label { Text("AI Polish") } icon: { ProgressView().controlSize(.mini) }
-                } else {
-                    Label("AI Polish", systemImage: "wand.and.stars")
-                }
-            }
-            .buttonStyle(.themed(showAIPanel ? .secondary : .outline, leadingIcon: true))
-            .help("Open the AI Polish panel: hand the plan to Claude Code or Codex for editorial touch-up")
-            Spacer()
-            if let fraction = model.exportProgress[folder] {
-                ExportProgressControls(fraction: fraction, width: 280) {
-                    model.cancelExport(recording)
-                }
-            } else {
-                Button("Export with Zooms") {
-                    recording.savePlan(segments)
-                    model.export(recording)
-                }
-                .buttonStyle(.themed(.primary))
-                .disabled(aiChat.running)
-            }
+    /// The zoom whose crop box the box view shows: the selection, or else
+    /// whichever zoom's motion window contains the playhead.
+    var boxSegmentIndex: Int? {
+        if let index = selectedSegmentIndex { return index }
+        return segments.firstIndex {
+            let span = motionSpan(for: $0)
+            return currentTime >= span.moveStart && currentTime <= span.outEnd
         }
     }
 
-    private func addZoomAtPlayhead() {
-        guard let meta else { return }
-        let start = min(currentTime, max(0, duration - 0.5))
-        let end = min(start + 2.0, duration)
-        // Center on wherever the cursor was at this moment, if we know.
-        let p = FrameComposer.cursorPosition(samples: meta.samples, at: start)
-        let config = ZoomPlanner.Config()
-        let segment = ZoomSegment(
-            start: start,
-            end: end,
-            zoom: config.zoomLevel,
-            cx: p?.x ?? Double(meta.pixelWidth) / 2,
-            cy: p?.y ?? Double(meta.pixelHeight) / 2
+    /// The zoom level in effect once `pan` has completed: its own, or the
+    /// latest earlier step's, or the zoom's base level.
+    func zoomLevel(in seg: ZoomSegment, after pan: PanMove) -> Double {
+        seg.pans
+            .filter { $0.t <= pan.t && $0.zoom != nil }
+            .max { $0.t < $1.t }?.zoom ?? seg.zoom
+    }
+
+    /// The zoom level the camera has at `t` inside `seg`'s hold.
+    func zoomLevel(in seg: ZoomSegment, at t: Double) -> Double {
+        seg.pans
+            .filter { $0.t <= t && $0.zoom != nil }
+            .max { $0.t < $1.t }?.zoom ?? seg.zoom
+    }
+
+    /// Read the level a pan lands on; write it as that pan's own level.
+    func panZoomBinding(segIndex: Int, panIndex: Int) -> Binding<Double> {
+        Binding(
+            get: {
+                guard segments.indices.contains(segIndex),
+                      segments[segIndex].pans.indices.contains(panIndex) else { return 1 }
+                let seg = segments[segIndex]
+                return zoomLevel(in: seg, after: seg.pans[panIndex])
+            },
+            set: { segments[segIndex].pans[panIndex].zoom = $0 }
         )
-        segments.append(segment)
-        selection = .segment(segment.id)
+    }
+
+    /// The zoom whose hold window (start…end) contains the playhead: where
+    /// "New pan" and an in-place "New zoom" go.
+    var holdSegmentIndex: Int? {
+        segments.firstIndex { currentTime >= $0.start && currentTime <= $0.end }
+    }
+
+    /// Index of the pan whose target the camera shows at the playhead, if any.
+    func activePanIndex(in seg: ZoomSegment) -> Int? {
+        let span = motionSpan(for: seg)
+        guard currentTime >= span.arrive, currentTime <= span.end else { return nil }
+        return seg.pans.indices
+            .filter { seg.pans[$0].t <= currentTime }
+            .max { seg.pans[$0].t < seg.pans[$1].t }
     }
 
     // MARK: - Helpers
 
-    private func seek(to t: Double) {
+    func seek(to t: Double) {
         player.seek(
             to: CMTime(seconds: t, preferredTimescale: 600),
             toleranceBefore: .zero, toleranceAfter: .zero
         )
     }
 
-    private func timecode(_ t: Double) -> String {
+    func timecode(_ t: Double) -> String {
         let total = max(0, t)
         return String(format: "%d:%05.2f", Int(total) / 60, total.truncatingRemainder(dividingBy: 60))
+    }
+
+    func timecodeShort(_ t: Double) -> String {
+        let total = Int(max(0, t).rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Holds the editor window so we can grow/shrink it without moving the titlebar.
+private final class EditorWindowHandle {
+    weak var window: NSWindow?
+
+    func growDown(by delta: CGFloat) {
+        guard delta != 0 else { return }
+        guard let window else { return }
+        var frame = window.frame
+        let top = frame.maxY
+        frame.size.height += delta
+        frame.origin.y = top - frame.size.height
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+            if frame.maxY > visible.maxY {
+                frame.origin.y = visible.maxY - frame.size.height
+            }
+            if frame.minY < visible.minY {
+                frame.origin.y = visible.minY
+                frame.size.height = min(frame.size.height, visible.height)
+            }
+        }
+        window.setFrame(frame, display: true, animate: false)
+    }
+}
+
+private struct EditorWindowHandleView: NSViewRepresentable {
+    let handle: EditorWindowHandle
+
+    func makeNSView(context: Context) -> NSView {
+        HandleView(handle: handle)
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? HandleView)?.handle = handle
+        handle.window = view.window
+    }
+
+    private final class HandleView: NSView {
+        var handle: EditorWindowHandle
+        init(handle: EditorWindowHandle) {
+            self.handle = handle
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError("unused") }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            handle.window = window
+        }
     }
 }

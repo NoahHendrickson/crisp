@@ -6,7 +6,7 @@ import CoreGraphics
 /// zoom camera transform, re-drawn vector cursor, click ripples.
 /// Shared by the offline exporter and the live editor preview, so the preview
 /// is pixel-identical to what exports.
-final class FrameComposer {
+final class FrameComposer: FrameComposing {
     let width: Double
     let height: Double
     private let keys: [ZoomPlanner.Keyframe]

@@ -15,7 +15,16 @@ final class MouseTracker {
     /// a full display, a window's frame, or a region rect.
     private var captureBounds: CGRect = .zero
     private var scale: Double = 1
+    /// Master-video size in pixels; cursor positions are mapped proportionally
+    /// into it so a window that is resized mid-recording still lines up.
+    private var pixelSize: CGSize = .zero
+    /// For window captures: the window to follow. Its bounds are re-read while
+    /// recording so a moved or resized window keeps mapping correctly.
+    private var windowID: CGWindowID?
+    private var ticksSinceBoundsRefresh = 0
     /// Host seconds of the first video frame; nil until capture actually starts.
+    /// Deliberately not reset by `start()`: the engine may report it before or
+    /// after the tracker starts, and a tracker is single-use anyway.
     private var sessionStart: Double?
 
     private(set) var events: [MouseEvent] = []
@@ -25,10 +34,11 @@ final class MouseTracker {
         CMClockGetTime(CMClockGetHostTimeClock()).seconds
     }
 
-    func start(originQuartz: CGPoint, sizePoints: CGSize, scale: Double) {
+    func start(originQuartz: CGPoint, sizePoints: CGSize, scale: Double, windowID: CGWindowID? = nil) {
         self.captureBounds = CGRect(origin: originQuartz, size: sizePoints)
         self.scale = scale
-        self.sessionStart = nil
+        self.pixelSize = CGSize(width: sizePoints.width * scale, height: sizePoints.height * scale)
+        self.windowID = windowID
         events = []
         samples = []
 
@@ -81,8 +91,30 @@ final class MouseTracker {
     }
 
     private func sampleCursor() {
+        refreshWindowBoundsIfDue()
         guard let t = relativeNow(), let p = currentCursorPixel() else { return }
         samples.append(CursorSample(t: t, x: p.x, y: p.y))
+    }
+
+    /// Window captures follow the window wherever it goes; re-read its frame a
+    /// few times a second so the cursor mapping follows too.
+    private func refreshWindowBoundsIfDue() {
+        guard let windowID else { return }
+        ticksSinceBoundsRefresh += 1
+        guard ticksSinceBoundsRefresh >= 10 else { return }
+        ticksSinceBoundsRefresh = 0
+        if let bounds = Self.currentBounds(of: windowID), bounds.width > 0, bounds.height > 0 {
+            captureBounds = bounds
+        }
+    }
+
+    /// Quartz-global bounds (points, top-left origin) of a window, or nil if it
+    /// has gone away.
+    private static func currentBounds(of windowID: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+              let dict = list.first?[kCGWindowBounds as String] as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: dict) else { return nil }
+        return rect
     }
 
     private func relativeNow() -> Double? {
@@ -94,12 +126,11 @@ final class MouseTracker {
     private func currentCursorPixel() -> (x: Double, y: Double)? {
         // CGEvent location is in Quartz global coordinates (top-left origin, y down),
         // the same space as CGDisplayBounds and SCWindow.frame — no Cocoa y-flip needed.
-        guard let loc = CGEvent(source: nil)?.location else { return nil }
-        let x = (loc.x - captureBounds.minX) * scale
-        let y = (loc.y - captureBounds.minY) * scale
-        guard x >= 0, y >= 0,
-              x <= captureBounds.width * scale,
-              y <= captureBounds.height * scale else { return nil }
-        return (x, y)
+        guard let loc = CGEvent(source: nil)?.location,
+              captureBounds.width > 0, captureBounds.height > 0 else { return nil }
+        let x = (loc.x - captureBounds.minX) / captureBounds.width * pixelSize.width
+        let y = (loc.y - captureBounds.minY) / captureBounds.height * pixelSize.height
+        guard x >= 0, y >= 0, x <= pixelSize.width, y <= pixelSize.height else { return nil }
+        return (Double(x), Double(y))
     }
 }
