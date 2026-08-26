@@ -165,11 +165,16 @@ struct Recording: Identifiable, Equatable {
     }
 
     static func savePlan(_ segments: [ZoomSegment], to url: URL) {
+        try? writePlan(segments, to: url)
+    }
+
+    /// Throwing form for callers that must know the plan reached disk
+    /// (the export snapshot gates "export succeeded" on it).
+    static func writePlan(_ segments: [ZoomSegment], to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        if let data = try? encoder.encode(ZoomPlan(segments: segments)) {
-            try? data.write(to: url)
-        }
+        let data = try encoder.encode(ZoomPlan(segments: segments))
+        try data.write(to: url, options: .atomic)
     }
 
     /// Sidecar written next to each export with the zoom plan that produced it

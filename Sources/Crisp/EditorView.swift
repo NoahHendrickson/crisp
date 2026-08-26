@@ -151,6 +151,10 @@ struct EditorView: View {
                             duration: duration,
                             segments: segments,
                             onApply: { plan in
+                                // A historical Compare must not outlive the plan it
+                                // was comparing; from here on compare shows the plan
+                                // this apply replaced vs. the live segments.
+                                compareTarget = nil
                                 compareBaseline = segments
                                 segments = plan
                                 select(nil)

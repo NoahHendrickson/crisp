@@ -146,8 +146,11 @@ final class Renderer {
         await writer.finishWriting()
         if let error = writer.error { throw error }
         // Remember which zooms produced this file, so the library can compare
-        // and restore versions after plan.json changes.
-        Recording.savePlan(segments, to: Recording.planSnapshotURL(for: outputURL))
+        // and restore versions after plan.json changes. The snapshot is part of
+        // the export: if it cannot be written the export is not a success and
+        // the defer above discards the video rather than leaving an
+        // unversioned file behind.
+        try Recording.writePlan(segments, to: Recording.planSnapshotURL(for: outputURL))
         succeeded = true
         progress(1)
         return outputURL
