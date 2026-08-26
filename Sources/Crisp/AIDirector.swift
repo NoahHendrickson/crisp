@@ -18,7 +18,108 @@ struct AIProvider: Identifiable, Equatable, Hashable {
 
     let kind: Kind
     let path: String
+    /// Models the CLI can be pointed at with `--model`; `nil` in the UI means
+    /// "whatever the CLI is configured to use".
+    var models: [AIModel] = []
+    /// What the CLI would use with no flags, read from its own config;
+    /// pre-selected in the UI.
+    var defaultModel: AIModel?
+    var defaultEffort: String?
     var id: String { kind.rawValue }
+}
+
+/// A model choice for one provider. `id` is what's passed to the CLI.
+struct AIModel: Identifiable, Equatable, Hashable {
+    let id: String
+    let label: String
+    /// Reasoning-effort levels this model accepts, lowest first.
+    var efforts: [String] = AIModel.standardEfforts
+    /// Effort the CLI picks for this model when none is configured.
+    var defaultEffort: String = "high"
+
+    /// Claude's `--effort` levels; also the fallback for Codex models whose
+    /// catalogue entry doesn't list any.
+    static let standardEfforts = ["low", "medium", "high", "xhigh", "max"]
+
+    /// Claude Code accepts aliases that always resolve to the latest release.
+    static let claude: [AIModel] = [
+        AIModel(id: "fable", label: "Fable 5"),
+        AIModel(id: "opus", label: "Opus 5"),
+        AIModel(id: "sonnet", label: "Sonnet 5"),
+        AIModel(id: "haiku", label: "Haiku 4.5"),
+    ]
+
+    /// Fallback when Codex's local model catalogue can't be read.
+    static let codexFallback: [AIModel] = [
+        AIModel(id: "gpt-5.6-sol", label: "GPT-5.6-Sol", defaultEffort: "medium"),
+        AIModel(id: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium"),
+        AIModel(id: "gpt-5.4", label: "GPT-5.4", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium"),
+        AIModel(id: "gpt-5.4-mini", label: "GPT-5.4-Mini", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium"),
+    ]
+
+    /// Codex keeps the model catalogue it last fetched in ~/.codex/models_cache.json.
+    static func codex() -> [AIModel] {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/models_cache.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = obj["models"] as? [[String: Any]] else { return codexFallback }
+        let listed = entries
+            .filter { ($0["visibility"] as? String ?? "list") == "list" }
+            .sorted { ($0["priority"] as? Int ?? .max) < ($1["priority"] as? Int ?? .max) }
+            .compactMap { entry -> AIModel? in
+                guard let slug = entry["slug"] as? String, !slug.isEmpty else { return nil }
+                let levels = (entry["supported_reasoning_levels"] as? [[String: Any]] ?? [])
+                    .compactMap { $0["effort"] as? String }
+                let efforts = levels.isEmpty ? standardEfforts : levels
+                let defaultLevel = entry["default_reasoning_level"] as? String
+                return AIModel(
+                    id: slug, label: entry["display_name"] as? String ?? slug,
+                    efforts: efforts,
+                    defaultEffort: defaultLevel.flatMap { efforts.contains($0) ? $0 : nil } ?? "medium"
+                )
+            }
+        return listed.isEmpty ? codexFallback : listed
+    }
+
+    // MARK: CLI defaults
+
+    /// `model` / `effortLevel` from ~/.claude/settings.json. A full model id
+    /// ("claude-fable-5") is matched to its alias ("fable").
+    static func claudeDefaults(models: [AIModel]) -> (AIModel?, String?) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (nil, nil)
+        }
+        var model: AIModel?
+        if let configured = (obj["model"] as? String)?.lowercased() {
+            model = models.first { configured == $0.id || configured.contains($0.id) }
+        }
+        let effort = (obj["effortLevel"] as? String ?? obj["effort"] as? String)?.lowercased()
+        return (model, effort)
+    }
+
+    /// `model` / `model_reasoning_effort` from ~/.codex/config.toml.
+    static func codexDefaults(models: [AIModel]) -> (AIModel?, String?) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/config.toml")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return (nil, nil) }
+        var values: [String: String] = [:]
+        for rawLine in text.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { break }   // top-level keys only
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: eq)...]
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            values[key] = value
+        }
+        let model = values["model"].flatMap { id in models.first { $0.id == id } }
+        return (model, values["model_reasoning_effort"]?.lowercased())
+    }
 }
 
 /// One streamed item from an agent turn.
@@ -46,7 +147,17 @@ enum AIDirector {
             if let out = try? await runShell("which \(binary)", cwd: nil, timeout: 10, onLine: nil),
                case let path = out.trimmingCharacters(in: .whitespacesAndNewlines),
                !path.isEmpty, path.hasPrefix("/") {
-                found.append(AIProvider(kind: kind, path: path))
+                let models = kind == .claude ? AIModel.claude : AIModel.codex()
+                let (configuredModel, configuredEffort) = kind == .claude
+                    ? AIModel.claudeDefaults(models: models)
+                    : AIModel.codexDefaults(models: models)
+                let model = configuredModel ?? models.first
+                let effort = configuredEffort.flatMap { level in
+                    (model?.efforts ?? AIModel.standardEfforts).contains(level) ? level : nil
+                } ?? model?.defaultEffort
+                found.append(AIProvider(
+                    kind: kind, path: path, models: models, defaultModel: model, defaultEffort: effort
+                ))
             }
         }
         return found
@@ -63,6 +174,11 @@ enum AIDirector {
     /// plan.json) lives for the whole session.
     final class Session {
         let provider: AIProvider
+        /// CLI model id (`--model`); nil leaves the CLI's own default in place.
+        let model: String?
+        /// Reasoning effort (`claude --effort`, codex `model_reasoning_effort`);
+        /// nil leaves the CLI's own default in place.
+        let effort: String?
         let recording: Recording
         let meta: RecordingMeta
         let duration: Double
@@ -77,8 +193,13 @@ enum AIDirector {
         /// True once a turn has completed successfully; later turns resume.
         private(set) var started = false
 
-        init(provider: AIProvider, recording: Recording, meta: RecordingMeta, duration: Double) throws {
+        init(
+            provider: AIProvider, model: String? = nil, effort: String? = nil,
+            recording: Recording, meta: RecordingMeta, duration: Double
+        ) throws {
             self.provider = provider
+            self.model = model
+            self.effort = effort
             self.recording = recording
             self.meta = meta
             self.duration = duration
@@ -166,7 +287,8 @@ enum AIDirector {
             }
             let cleaned = AIDirector.validate(dto, duration: duration, meta: meta)
             guard !cleaned.isEmpty || dto.segments.isEmpty else { throw DirectorError.emptyPlan }
-            AppModel.log("AI polish (\(provider.kind.rawValue)): \(segments.count) → \(cleaned.count) segments")
+            let tag = [provider.kind.rawValue, model, effort].compactMap { $0 }.joined(separator: " / ")
+            AppModel.log("AI polish (\(tag)): \(segments.count) → \(cleaned.count) segments")
             return cleaned
         }
 
@@ -174,16 +296,20 @@ enum AIDirector {
 
         private func makeCommand(resume: Bool) -> String {
             let bin = "\"\(provider.path)\""
+            // Both CLIs take model/effort per invocation, so they're repeated on resume.
+            let modelFlag = model.map { " --model \"\($0)\"" } ?? ""
             switch provider.kind {
             case .claude:
                 let id = sessionID ?? UUID().uuidString.lowercased()
                 sessionID = id
                 let session = resume ? "--resume \(id)" : "--session-id \(id)"
+                let effortFlag = effort.map { " --effort \($0)" } ?? ""
                 // acceptEdits: file writes inside the workspace cwd are auto-approved.
-                return "\(bin) -p \(session) --output-format stream-json --verbose --permission-mode acceptEdits < prompt.txt"
+                return "\(bin) -p \(session)\(modelFlag)\(effortFlag) --output-format stream-json --verbose --permission-mode acceptEdits < prompt.txt"
             case .codex:
                 let images = frames.map { "-i \"\($0.file)\"" }.joined(separator: " ")
-                let common = "--json --skip-git-repo-check -c sandbox_mode=\\\"workspace-write\\\""
+                let effortFlag = effort.map { " -c model_reasoning_effort=\\\"\($0)\\\"" } ?? ""
+                let common = "--json --skip-git-repo-check -c sandbox_mode=\\\"workspace-write\\\"" + modelFlag + effortFlag
                 if resume, let sessionID {
                     return "\(bin) exec resume \(sessionID) \(common) \(images) - < prompt.txt"
                 }
@@ -342,17 +468,21 @@ enum AIDirector {
             [
                 "start": round2(seg.start), "end": round2(seg.end), "zoom": round2(seg.zoom),
                 "cx": round2(seg.cx), "cy": round2(seg.cy),
-                "pans": seg.pans.map { [
-                    "t": round2($0.t), "duration": round2($0.duration),
-                    "cx": round2($0.cx), "cy": round2($0.cy),
-                ] },
+                "pans": seg.pans.map { pan in
+                    var dto: [String: Any] = [
+                        "t": round2(pan.t), "duration": round2(pan.duration),
+                        "cx": round2(pan.cx), "cy": round2(pan.cy),
+                    ]
+                    if let zoom = pan.zoom { dto["zoom"] = round2(zoom) }
+                    return dto
+                },
             ]
         }
         return try JSONSerialization.data(withJSONObject: ["segments": plan], options: [.sortedKeys])
     }
 
     private static let planShape =
-        #"{"segments":[{"start":0.0,"end":0.0,"zoom":1.8,"cx":0.0,"cy":0.0,"pans":[{"t":0.0,"duration":0.5,"cx":0.0,"cy":0.0}]}]}"#
+        #"{"segments":[{"start":0.0,"end":0.0,"zoom":1.8,"cx":0.0,"cy":0.0,"pans":[{"t":0.0,"duration":0.5,"cx":0.0,"cy":0.0,"zoom":2.2}]}]}"#
 
     private static func firstPrompt(note: String, frames: [Frame], workspace: URL) -> String {
         let frameList = frames
@@ -375,7 +505,10 @@ enum AIDirector {
         camera automatically begins moving ~0.7s before `start` and arrives just before it, \
         and eases back out ~0.7s after `end`. So `start` should be at (or a hair before) the \
         first click of the action it covers. A pan glides the zoomed camera to a new center \
-        (cx, cy) at time `t` over `duration` seconds, and must lie within its segment.
+        (cx, cy) at time `t` over `duration` seconds, and must lie within its segment. A pan \
+        may also carry its own `zoom` to tighten (or loosen) the camera as it glides — use \
+        this to zoom in further on a small element mid-hold instead of zooming out and back \
+        in; omit `zoom` to keep the current level.
 
         Polish goals, in priority order:
         1. Timing: each zoom's hold should open on the click it serves — never noticeably late.
@@ -429,6 +562,7 @@ enum AIDirector {
             var duration: Double?
             var cx: Double
             var cy: Double
+            var zoom: Double?
         }
     }
 
@@ -455,7 +589,8 @@ enum AIDirector {
                     t: t,
                     duration: min(max(pan.duration ?? 0.5, 0.15), 1.5),
                     cx: min(max(pan.cx, 0), w),
-                    cy: min(max(pan.cy, 0), h)
+                    cy: min(max(pan.cy, 0), h),
+                    zoom: pan.zoom.map { min(max($0, 1.2), 3.0) }
                 ))
             }
             result.append(ZoomSegment(

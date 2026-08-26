@@ -29,7 +29,10 @@ enum AppAppearance: String {
 // MARK: - Window chrome
 
 /// Paints the titlebar with the theme background so the window reads as one
-/// surface, like the Figma frame.
+/// surface, like the Figma frame. The main window also uses
+/// `.windowStyle(.hiddenTitleBar)` and draws its own titlebar strip
+/// (`TitlebarStrip`), because on macOS 26 the system titlebar paints a glass
+/// material over `titlebarAppearsTransparent` windows.
 ///
 /// Applied once, when the view lands in its window. The background is a
 /// dynamic NSColor and the window inherits `NSApp.appearance`, so light/dark
@@ -43,7 +46,28 @@ struct WindowChrome: NSViewRepresentable {
             super.viewDidMoveToWindow()
             guard let window else { return }
             window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.backgroundColor = Theme.backgroundNSColor
+        }
+    }
+}
+
+/// The 33pt titlebar strip of a hidden-title-bar window (Figma 68:11636):
+/// a 16pt row inside 8pt padding — the title at 12pt medium, 16pt after the
+/// 52pt traffic-light cluster — over a 1pt `--border` divider. Place at the
+/// top of the root stack.
+struct TitlebarStrip: View {
+    let title: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(title)
+                .font(Theme.font(.label12))
+                .foregroundStyle(Theme.foreground)
+                .padding(.leading, 76)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 32)
+            Rectangle().fill(Theme.border).frame(height: 1)
         }
     }
 }

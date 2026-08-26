@@ -33,7 +33,35 @@ final class AIChat: ObservableObject {
     /// are follow-up notes. Mirrors `Session.started`.
     @Published private(set) var hasStarted = false
     @Published var providers: [AIProvider] = []
-    @Published var provider: AIProvider?
+    @Published var provider: AIProvider? {
+        didSet {
+            model = Self.storedModel(for: provider)
+            effort = Self.storedEffort(for: provider)
+        }
+    }
+    /// Model within the chosen provider. Starts as the CLI's own configured
+    /// default; an explicit pick is remembered per provider across launches.
+    @Published var model: AIModel? {
+        didSet {
+            guard let provider else { return }
+            UserDefaults.standard.set(model?.id, forKey: Self.modelKey(provider.kind))
+            if let effort, !efforts.contains(effort) {
+                self.effort = model?.defaultEffort ?? provider.defaultEffort
+            }
+        }
+    }
+    /// Reasoning effort, likewise defaulted from the CLI and remembered per provider.
+    @Published var effort: String? {
+        didSet {
+            guard let provider else { return }
+            UserDefaults.standard.set(effort, forKey: Self.effortKey(provider.kind))
+        }
+    }
+
+    /// Effort levels the chosen model accepts.
+    var efforts: [String] {
+        model?.efforts ?? provider?.defaultModel?.efforts ?? AIModel.standardEfforts
+    }
 
     private var session: AIDirector.Session?
     private var turn: Task<Void, Never>?
@@ -46,6 +74,28 @@ final class AIChat: ObservableObject {
         if provider == nil { provider = providers.first }
     }
 
+    private static func modelKey(_ kind: AIProvider.Kind) -> String { "ai.model.\(kind.rawValue)" }
+    private static func effortKey(_ kind: AIProvider.Kind) -> String { "ai.effort.\(kind.rawValue)" }
+
+    private static func storedEffort(for provider: AIProvider?) -> String? {
+        guard let provider else { return nil }
+        let model = storedModel(for: provider)
+        if let stored = UserDefaults.standard.string(forKey: effortKey(provider.kind)),
+           model?.efforts.contains(stored) ?? true {
+            return stored
+        }
+        return model?.defaultEffort ?? provider.defaultEffort
+    }
+
+    private static func storedModel(for provider: AIProvider?) -> AIModel? {
+        guard let provider else { return nil }
+        if let id = UserDefaults.standard.string(forKey: modelKey(provider.kind)),
+           let stored = provider.models.first(where: { $0.id == id }) {
+            return stored
+        }
+        return provider.defaultModel
+    }
+
     /// Send a note (may be empty on the first turn = "default polish").
     /// `apply` is called on the main actor with the validated new plan, after
     /// every streamed event has landed in the transcript.
@@ -56,10 +106,12 @@ final class AIChat: ObservableObject {
         apply: @escaping ([ZoomSegment]) -> Void
     ) {
         guard let provider, !running else { return }
-        if session == nil || session?.provider != provider {
+        if session == nil || session?.provider != provider
+            || session?.model != model?.id || session?.effort != effort {
             do {
                 session = try AIDirector.Session(
-                    provider: provider, recording: recording, meta: meta, duration: duration
+                    provider: provider, model: model?.id, effort: effort,
+                    recording: recording, meta: meta, duration: duration
                 )
             } catch {
                 messages.append(AIMessage(role: .system, text: error.localizedDescription))
@@ -140,11 +192,13 @@ final class AIChat: ObservableObject {
     }
 }
 
-/// Right-hand chat panel: header with provider picker, the transcript, and a
-/// composer. The first send polishes with the built-in brief (plus any note);
-/// later sends are follow-up director's notes in the same session.
+/// Right-hand chat sidebar (Figma 29:4691): the transcript on top, and a
+/// composer group pinned to the bottom — note field + send, then a row of
+/// provider / model / effort chips. The first send polishes with the
+/// built-in brief (plus any note); later sends are follow-up director's
+/// notes in the same session.
 struct AIPanelView: View {
-    static let width: CGFloat = 320
+    static let width: CGFloat = 445
 
     @ObservedObject var chat: AIChat
     let recording: Recording
@@ -152,60 +206,24 @@ struct AIPanelView: View {
     let duration: Double
     let segments: [ZoomSegment]
     let onApply: ([ZoomSegment]) -> Void
-    let onClose: () -> Void
+    /// Open the split before/after preview against the given baseline plan.
+    let onCompare: ([ZoomSegment]) -> Void
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().overlay(Theme.border)
+        VStack(spacing: 24) {
             transcript
-            Divider().overlay(Theme.border)
             composer
         }
+        .padding(24)
         .frame(width: Self.width)
-        .background(Theme.panel)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusLg))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusLg).strokeBorder(Theme.border))
-    }
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wand.and.stars")
-                .foregroundStyle(Theme.mutedForeground)
-            Text("AI Polish")
-                .font(Theme.font(13, .semibold))
-            Spacer()
-            Picker("", selection: $chat.provider) {
-                ForEach(chat.providers) { provider in
-                    Text(provider.kind.rawValue).tag(Optional(provider))
-                }
-            }
-            .labelsHidden()
-            .fixedSize()
-            .disabled(chat.running || chat.hasStarted)
-            .help(chat.hasStarted ? "Clear the conversation to switch provider" : "Agent CLI to use")
-            if !chat.messages.isEmpty {
-                Button {
-                    chat.clear()
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                }
-                .buttonStyle(.themed(.ghost, size: .xs))
-                .help(chat.running ? "Stop and start a new conversation" : "Start a new conversation")
-            }
-            Button {
-                onClose()
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.themed(.ghost, size: .xs))
-            .help("Close")
+        .frame(maxHeight: .infinity)
+        .background(Theme.card)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Theme.border).frame(width: 1)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 
     private var transcript: some View {
@@ -217,11 +235,10 @@ struct AIPanelView: View {
                     }
                     ForEach(chat.messages) { message in
                         MessageRow(message: message, isLast: message.id == chat.messages.last?.id,
-                                   running: chat.running, onRevert: onApply)
+                                   running: chat.running, onRevert: onApply, onCompare: onCompare)
                             .id(message.id)
                     }
                 }
-                .padding(12)
             }
             .onChange(of: scrollKey) { _, _ in
                 if let id = chat.messages.last?.id {
@@ -240,7 +257,7 @@ struct AIPanelView: View {
     private var intro: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Hand your zoom plan to an agent for an editorial pass: tighter timing, fewer zooms and pans, better framing.")
-            Text("Add a director's note if you want something specific, or just hit Polish.")
+            Text("Describe the polish you want, or just send to use the default brief.")
                 .foregroundStyle(Theme.mutedForeground)
             if chat.providers.isEmpty {
                 Text("No agent CLI found. Install Claude Code or Codex and sign in.")
@@ -248,41 +265,112 @@ struct AIPanelView: View {
                     .padding(.top, 4)
             }
         }
-        .font(Theme.font(12))
+        .font(Theme.font(.body12))
         .foregroundStyle(Theme.textSecondary)
     }
 
+    // MARK: - Composer (Figma 29:4692)
+
     private var composer: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            TextField(
-                chat.hasStarted ? "Follow-up note…" : "Director's note (optional) — e.g. “calmer, only zoom on the form”",
-                text: $draft, axis: .vertical
-            )
-            .lineLimit(1...5)
-            .textFieldStyle(.plain)
-            .font(Theme.font(12))
+        VStack(spacing: 0) {
+            HStack(spacing: 24) {
+                TextField(
+                    chat.hasStarted ? "Follow-up note…" : "Describe the polish",
+                    text: $draft, axis: .vertical
+                )
+                .lineLimit(1...5)
+                .textFieldStyle(.plain)
+                .font(Theme.font(.body12))
+                .focused($composerFocused)
+                .disabled(chat.running)
+                .onSubmit(send)
+                Button(action: send) {
+                    if chat.running {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Icon(name: "arrow-return", size: 12, fallback: "return")
+                    }
+                }
+                .buttonStyle(.themed(.primary, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
+                .disabled(!canSend)
+                .keyboardShortcut(.return, modifiers: .command)
+                .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Polish (⌘↩)")
+            }
             .padding(8)
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radiusSm))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusSm).strokeBorder(Theme.input))
-            .focused($composerFocused)
-            .disabled(chat.running)
-            .onSubmit(send)
-            HStack {
-                if chat.running {
-                    ProgressView().controlSize(.small)
-                    Text("Working…")
-                        .font(Theme.font(11))
-                        .foregroundStyle(Theme.mutedForeground)
+            .frame(minHeight: 44)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).strokeBorder(Theme.input))
+
+            HStack(spacing: 6) {
+                chip(Self.providerMenu, title: chat.provider?.kind.rawValue ?? "No agent",
+                     help: chat.hasStarted ? "Clear the conversation to switch provider" : "Agent CLI to use")
+                if !chat.messages.isEmpty {
+                    Button {
+                        chat.clear()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.themed(.ghost, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
+                    .tooltip(chat.running ? "Stop and start a new conversation" : "Start a new conversation")
                 }
                 Spacer()
-                Button(chat.hasStarted ? "Send" : "Polish", action: send)
-                    .buttonStyle(.themed(.primary, size: .sm))
-                    .disabled(!canSend)
-                    .keyboardShortcut(.return, modifiers: .command)
+                if let provider = chat.provider, !provider.models.isEmpty {
+                    chip(Self.modelMenu, title: chat.model?.label ?? "Model",
+                         help: chat.hasStarted ? "Clear the conversation to switch model" : "Model for \(provider.kind.rawValue)")
+                    chip(Self.effortMenu, title: chat.effort?.capitalized ?? "Effort",
+                         help: chat.hasStarted ? "Clear the conversation to change effort" : "Reasoning effort")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+        .background(Theme.track, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+        .onAppear { composerFocused = true }
+    }
+
+    private static let providerMenu = "provider"
+    private static let modelMenu = "model"
+    private static let effortMenu = "effort"
+
+    /// Footer chip (Figma "Button" xs ghost + trailing CaretDown); secondary
+    /// fill while its dropdown is open above it.
+    private func chip(_ id: String, title: String, help: String) -> some View {
+        DropdownButton(
+            id: id, edge: .top, alignment: .trailing,
+            style: { .themed($0 ? .secondary : .ghost, size: .xs, corners: .all(Theme.radiusMd), trailingIcon: true) },
+            items: { menuItems(for: id) }
+        ) { _ in
+            HStack(spacing: 4) {
+                Text(title)
+                Icon(name: "caret-down", size: 12, fallback: "chevron.down")
             }
         }
-        .padding(12)
-        .onAppear { composerFocused = true }
+        .fixedSize()
+        .disabled(chat.running || chat.hasStarted)
+        .tooltip(help)
+    }
+
+    private func menuItems(for id: String) -> [DropdownItem] {
+        func pick(_ action: @escaping () -> Void) -> () -> Void { action }
+        switch id {
+        case Self.providerMenu:
+            return chat.providers.map { provider in
+                DropdownItem(id: provider.id, label: provider.kind.rawValue,
+                             checked: chat.provider == provider, action: pick { chat.provider = provider })
+            }
+        case Self.modelMenu:
+            return (chat.provider?.models ?? []).map { model in
+                DropdownItem(id: model.id, label: model.label, checked: chat.model == model,
+                             action: pick { chat.model = model })
+            }
+        case Self.effortMenu:
+            return chat.efforts.map { level in
+                DropdownItem(id: level, label: level.capitalized, checked: chat.effort == level,
+                             action: pick { chat.effort = level })
+            }
+        default:
+            return []
+        }
     }
 
     private var canSend: Bool {
@@ -309,47 +397,52 @@ private struct MessageRow: View {
     let isLast: Bool
     let running: Bool
     let onRevert: ([ZoomSegment]) -> Void
+    let onCompare: ([ZoomSegment]) -> Void
 
     var body: some View {
         switch message.role {
         case .user:
-            HStack {
-                Spacer(minLength: 40)
-                Text(message.text)
-                    .font(Theme.font(12))
-                    .foregroundStyle(Theme.primaryForeground)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Theme.primary, in: RoundedRectangle(cornerRadius: Theme.radiusMd))
-                    .textSelection(.enabled)
-            }
+            Text(message.text)
+                .font(Theme.font(.label12))
+                .foregroundStyle(Theme.foreground)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.muted, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).strokeBorder(Theme.input))
+                .textSelection(.enabled)
         case .system:
             Text(message.text)
-                .font(Theme.font(11))
+                .font(Theme.font(.body12))
                 .foregroundStyle(Theme.destructive)
         case .assistant:
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(message.activities) { activity in
                     Label(label(for: activity), systemImage: icon(for: activity.kind))
-                        .font(Theme.font(11))
+                        .font(Theme.font(.body12))
                         .foregroundStyle(Theme.mutedForeground)
                         .lineLimit(1)
                 }
                 if !message.text.isEmpty {
                     Text(markdown(message.text))
-                        .font(Theme.font(12))
+                        .font(Theme.font(.body12))
                         .foregroundStyle(Theme.foreground)
                         .textSelection(.enabled)
                         .padding(.top, message.activities.isEmpty ? 0 : 2)
                 } else if isLast && running {
                     Text("Thinking…")
-                        .font(Theme.font(12))
+                        .font(Theme.font(.body12))
                         .foregroundStyle(Theme.mutedForeground)
                 }
                 if let before = message.before {
-                    Button("Revert this change") { onRevert(before) }
-                        .buttonStyle(.themed(.link, size: .xs))
-                        .disabled(running)
+                    HStack(spacing: 12) {
+                        Button("Compare") { onCompare(before) }
+                            .buttonStyle(.themed(.link, size: .xs))
+                            .tooltip("Play the edited zooms before and after this change, stacked")
+                        Button("Revert this change") { onRevert(before) }
+                            .buttonStyle(.themed(.link, size: .xs))
+                            .tooltip("Put the zooms back to how they were before this change")
+                    }
+                    .disabled(running)
                 }
             }
         }

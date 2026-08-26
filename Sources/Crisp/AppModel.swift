@@ -40,6 +40,22 @@ final class AppModel: ObservableObject {
         case window(CGWindowID)
     }
 
+    /// The two lists in the Window target menu: plain app windows, or Chrome tabs.
+    enum WindowPickerMode: String, CaseIterable, Identifiable {
+        case apps = "App Windows"
+        case chrome = "Chrome Tabs"
+        var id: String { rawValue }
+    }
+
+    enum ChromeTabsStatus: Equatable {
+        case idle
+        case loading
+        case loaded
+        case notRunning
+        case notPermitted
+        case failed(String)
+    }
+
     @Published var state: State = .idle
     /// Determined by actually probing ScreenCaptureKit once at launch — the
     /// CGPreflight* legacy check reports false negatives on modern macOS even
@@ -47,19 +63,41 @@ final class AppModel: ObservableObject {
     @Published var hasScreenAccess = false
     /// False until the first probe completes (UI shows a spinner meanwhile).
     @Published var accessChecked = false
-    @Published var sourceKind: SourceKind = .display
+    @Published var sourceKind: SourceKind = .display {
+        didSet { if oldValue != sourceKind { scheduleLivePreview() } }
+    }
     @Published var displays: [SCDisplay] = []
     @Published var windows: [SCWindow] = []
-    @Published var selectedDisplayID: CGDirectDisplayID?
-    @Published var selectedWindowID: CGWindowID?
+    @Published var selectedDisplayID: CGDirectDisplayID? {
+        didSet { if oldValue != selectedDisplayID { scheduleLivePreview() } }
+    }
+    @Published var selectedWindowID: CGWindowID? {
+        didSet { if oldValue != selectedWindowID { scheduleLivePreview() } }
+    }
+    @Published var windowPickerMode: WindowPickerMode = .apps
+    @Published var chromeTabs: [ChromeTab] = []
+    @Published var chromeTabsStatus: ChromeTabsStatus = .idle
+    /// Set when the selected window was chosen as a Chrome tab. ScreenCaptureKit
+    /// records the window, so the tab is re-activated right before recording.
+    @Published var selectedChromeTab: ChromeTab?
+    private var chromeListTask: Task<Void, Never>?
     /// Region in points, top-left origin, local to the selected display.
-    @Published var region: CGRect?
+    @Published var region: CGRect? {
+        didSet { if oldValue != region { scheduleLivePreview() } }
+    }
     @Published var codec: MasterCodec = .hevc10
+    /// Container/codec for "Export with zooms"; persisted across launches.
+    @Published var exportFormat: ExportFormat = ExportFormat(
+        rawValue: UserDefaults.standard.string(forKey: ExportFormat.defaultsKey) ?? ""
+    ) ?? .default {
+        didSet { UserDefaults.standard.set(exportFormat.rawValue, forKey: ExportFormat.defaultsKey) }
+    }
     @Published var recordings: [Recording] = []
     @Published var exportProgress: [URL: Double] = [:]
     private var exportRenderers: [URL: Renderer] = [:]
     @Published var thumbnails: [ThumbKey: CGImage] = [:]
-    @Published var regionPreview: CGImage?
+    /// Sharper capture for the large source preview; picker thumbs stay small.
+    @Published var livePreview: CGImage?
     @Published var isPickingRegion = false
     /// Transient confirmation message (e.g. "Screenshot saved"), auto-clears.
     @Published var toast: String?
@@ -215,6 +253,7 @@ final class AppModel: ObservableObject {
                 .sorted { ($0.owningApplication?.applicationName ?? "") < ($1.owningApplication?.applicationName ?? "") }
             if let id = selectedWindowID, !windows.contains(where: { $0.windowID == id }) {
                 selectedWindowID = nil
+                selectedChromeTab = nil
             }
 
             await refreshThumbnails()
@@ -249,13 +288,49 @@ final class AppModel: ObservableObject {
             }
         }
         thumbnails = fresh
+        await refreshLivePreview()
+    }
 
-        if let display = selectedDisplay, let region {
+    /// Enough pixels to fill a large Retina preview pane without upscaling.
+    private static let livePreviewMaxWidth: Double = 3840
+    private var livePreviewGeneration = 0
+
+    private func scheduleLivePreview() {
+        livePreview = nil
+        livePreviewGeneration += 1
+        let generation = livePreviewGeneration
+        Task { await refreshLivePreview(generation: generation) }
+    }
+
+    private func refreshLivePreview(generation: Int? = nil) async {
+        let generation = generation ?? livePreviewGeneration
+        guard hasScreenAccess, !isRecording else { return }
+        let image: CGImage?
+        switch sourceKind {
+        case .display:
+            guard let display = selectedDisplay else {
+                if generation == livePreviewGeneration { livePreview = nil }
+                return
+            }
             let filter = SCContentFilter(display: display, excludingWindows: [])
-            regionPreview = await Self.thumbnail(filter: filter, sourceRect: region)
-        } else {
-            regionPreview = nil
+            image = await Self.thumbnail(filter: filter, maxWidth: Self.livePreviewMaxWidth)
+        case .window:
+            guard let window = selectedWindow else {
+                if generation == livePreviewGeneration { livePreview = nil }
+                return
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            image = await Self.thumbnail(filter: filter, maxWidth: Self.livePreviewMaxWidth)
+        case .region:
+            guard let display = selectedDisplay, let region else {
+                if generation == livePreviewGeneration { livePreview = nil }
+                return
+            }
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            image = await Self.thumbnail(filter: filter, sourceRect: region, maxWidth: Self.livePreviewMaxWidth)
         }
+        guard generation == livePreviewGeneration else { return }
+        livePreview = image
     }
 
     private static func thumbnail(
@@ -267,11 +342,98 @@ final class AppModel: ObservableObject {
         if let sourceRect {
             config.sourceRect = sourceRect
         }
-        let aspect = size.height / size.width
-        config.width = Int(maxWidth)
-        config.height = max(1, Int(maxWidth * aspect))
+        let nativeWidth = size.width * Double(filter.pointPixelScale)
+        let nativeHeight = size.height * Double(filter.pointPixelScale)
+        guard nativeWidth > 0, nativeHeight > 0 else { return nil }
+        let width = min(nativeWidth, maxWidth)
+        let height = nativeHeight * (width / nativeWidth)
+        config.width = max(1, Int(width.rounded()))
+        config.height = max(1, Int(height.rounded()))
         config.showsCursor = false
         return try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
+    // MARK: - Window & Chrome tab selection
+
+    func selectWindow(_ id: CGWindowID) {
+        selectedChromeTab = nil
+        selectedWindowID = id
+    }
+
+    /// The Chrome window (as ScreenCaptureKit sees it) currently showing `tab`.
+    /// Only active tabs are visible, so only they can have a thumbnail.
+    func chromeWindow(for tab: ChromeTab) -> SCWindow? {
+        guard tab.isActive else { return nil }
+        return ChromeBridge.matchWindow(title: tab.title, bounds: tab.windowBounds, in: windows)
+    }
+
+    /// (Re)list Chrome's tabs. First use triggers the system's
+    /// "Crisp wants to control Google Chrome" prompt.
+    func loadChromeTabs() {
+        guard ChromeBridge.isRunning else {
+            chromeListTask?.cancel()
+            chromeTabs = []
+            chromeTabsStatus = .notRunning
+            return
+        }
+        // One listing at a time: scripts run serially, so piling on Try Again
+        // clicks would only queue duplicate work behind the one in flight.
+        guard chromeListTask == nil else { return }
+        if chromeTabs.isEmpty { chromeTabsStatus = .loading }
+        chromeListTask = Task {
+            defer { chromeListTask = nil }
+            do {
+                let tabs = try await ChromeBridge.listTabs()
+                chromeTabs = tabs
+                chromeTabsStatus = .loaded
+                Self.log("chrome: listed \(tabs.count) tabs")
+            } catch {
+                chromeTabs = []
+                chromeTabsStatus = Self.chromeStatus(for: error)
+            }
+        }
+    }
+
+    private static func chromeStatus(for error: Error) -> ChromeTabsStatus {
+        switch error as? ChromeBridgeError {
+        case .notRunning: return .notRunning
+        case .notPermitted: return .notPermitted
+        default: return .failed(error.localizedDescription)
+        }
+    }
+
+    /// Pick a Chrome tab: bring it forward in its window and target that window.
+    func selectChromeTab(_ tab: ChromeTab) {
+        selectedChromeTab = tab
+        Task {
+            do {
+                let window = try await activateChromeTab(tab)
+                guard selectedChromeTab?.id == tab.id else { return }
+                selectedWindowID = window.windowID
+            } catch {
+                guard selectedChromeTab?.id == tab.id else { return }
+                selectedChromeTab = nil
+                state = .error(error.localizedDescription)
+                loadChromeTabs()
+            }
+        }
+    }
+
+    private func activateChromeTab(_ tab: ChromeTab) async throws -> SCWindow {
+        let activated = try await ChromeBridge.activate(tab)
+        // Give Chrome a beat to retitle the window before re-listing.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await refreshShareableContent()
+        guard let window = ChromeBridge.matchWindow(
+            title: activated.title, bounds: activated.bounds, in: windows
+        ) else {
+            let chromeWindows = windows
+                .filter { $0.owningApplication?.bundleIdentifier == ChromeBridge.bundleID }
+                .map { "\"\($0.title ?? "")\" \($0.frame)" }
+            Self.log("chrome: no window matched title=\"\(activated.title)\" bounds=\(activated.bounds); candidates=\(chromeWindows)")
+            throw ChromeBridgeError.windowNotFound
+        }
+        return window
     }
 
     // MARK: - Region picking
@@ -310,6 +472,15 @@ final class AppModel: ObservableObject {
             state = .error("Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch.")
             return
         }
+        if sourceKind == .window, let tab = selectedChromeTab {
+            // The user may have switched tabs since picking; show theirs again.
+            do {
+                selectedWindowID = try await activateChromeTab(tab).windowID
+            } catch {
+                state = .error(error.localizedDescription)
+                return
+            }
+        }
         guard let source = buildSource() else {
             switch sourceKind {
             case .display: state = .error("No display available to record.")
@@ -339,10 +510,13 @@ final class AppModel: ObservableObject {
                 options: .init(source: source, codec: codec),
                 masterURL: folder.appendingPathComponent("master.mov")
             )
+            var windowID: CGWindowID?
+            if case .window(let window) = source { windowID = window.windowID }
             tracker.start(
                 originQuartz: engine.captureOriginQuartz,
                 sizePoints: engine.capturePointSize,
-                scale: engine.scaleFactor
+                scale: engine.scaleFactor,
+                windowID: windowID
             )
 
             self.engine = engine
@@ -438,9 +612,10 @@ final class AppModel: ObservableObject {
         exportProgress[recording.folder] = 0
         let renderer = Renderer()
         exportRenderers[recording.folder] = renderer
+        let format = exportFormat
         Task.detached { [weak self] in
             do {
-                try await renderer.export(recording: recording) { fraction in
+                let url = try await renderer.export(recording: recording, format: format) { fraction in
                     DispatchQueue.main.async {
                         self?.exportProgress[recording.folder] = fraction
                     }
@@ -448,7 +623,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { [weak self] in
                     self?.clearExport(recording.folder)
                     self?.recordings = Recording.loadAll()
-                    NSWorkspace.shared.activateFileViewerSelecting([recording.exportURL])
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
             } catch is Renderer.Cancelled {
                 await MainActor.run { [weak self] in
@@ -476,8 +651,52 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([recording.masterURL])
     }
 
+    /// Renames the recording folder. No-op if the name is unchanged, empty,
+    /// contains path characters, or collides with an existing folder.
+    func rename(_ recording: Recording, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != recording.name,
+              !trimmed.contains("/"), !trimmed.contains(":")
+        else { return }
+        let dest = recording.folder.deletingLastPathComponent().appendingPathComponent(trimmed)
+        guard !FileManager.default.fileExists(atPath: dest.path) else { return }
+        do {
+            try FileManager.default.moveItem(at: recording.folder, to: dest)
+        } catch {
+            return
+        }
+        if let fraction = exportProgress.removeValue(forKey: recording.folder) {
+            exportProgress[dest] = fraction
+        }
+        if let renderer = exportRenderers.removeValue(forKey: recording.folder) {
+            exportRenderers[dest] = renderer
+        }
+        recordings = Recording.loadAll()
+    }
+
     func delete(_ recording: Recording) {
         try? FileManager.default.trashItem(at: recording.folder, resultingItemURL: nil)
+        recordings = Recording.loadAll()
+    }
+
+    // MARK: Per-file (export version) actions
+
+    func open(_ file: RecordingFile) {
+        NSWorkspace.shared.open(file.url)
+    }
+
+    func reveal(_ file: RecordingFile) {
+        NSWorkspace.shared.activateFileViewerSelecting([file.url])
+    }
+
+    /// Trashes one export (and its plan snapshot). The master is only removed
+    /// with the whole recording via `delete(_:)`.
+    func delete(_ file: RecordingFile) {
+        guard !file.isMaster else { return }
+        try? FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
+        if let snapshot = file.planSnapshotURL {
+            try? FileManager.default.trashItem(at: snapshot, resultingItemURL: nil)
+        }
         recordings = Recording.loadAll()
     }
 }

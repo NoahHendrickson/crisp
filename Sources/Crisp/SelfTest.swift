@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreGraphics
+import CoreImage
 
 /// Headless pipeline check (`Crisp --selftest`): synthesizes a short gradient
 /// master with fake click events, runs the real zoom-export renderer on it, and
@@ -58,12 +59,15 @@ enum SelfTest {
 
         print("selftest: master written, exporting with zooms...")
         let renderer = Renderer()
-        try await renderer.export(recording: recording) { fraction in
+        let exportURL = try await renderer.export(recording: recording) { fraction in
             print(String(format: "selftest: export %3.0f%%", fraction * 100))
+        }
+        guard exportURL.lastPathComponent == "export.mov" else {
+            throw SelfTestError.badExportName(exportURL.lastPathComponent)
         }
 
         // Verify the export.
-        let asset = AVURLAsset(url: recording.exportURL)
+        let asset = AVURLAsset(url: exportURL)
         let exportedDuration = try await asset.load(.duration).seconds
         guard abs(exportedDuration - duration) < 0.25 else {
             throw SelfTestError.badDuration(exportedDuration)
@@ -75,7 +79,7 @@ enum SelfTest {
         guard Int(size.width) == width, Int(size.height) == height else {
             throw SelfTestError.badSize(size)
         }
-        let bytes = try FileManager.default.attributesOfItem(atPath: recording.exportURL.path)[.size] as? Int ?? 0
+        let bytes = try FileManager.default.attributesOfItem(atPath: exportURL.path)[.size] as? Int ?? 0
         print("selftest: export ok — \(Int(size.width))×\(Int(size.height)), \(String(format: "%.2f", exportedDuration))s, \(bytes / 1024) KB")
 
         // Second pass: export again through an edited plan.json (the editor path).
@@ -85,13 +89,42 @@ enum SelfTest {
                 pans: [PanMove(t: 0.8, duration: 0.4, cx: 900, cy: 300)]
             )
         ])
-        try await Renderer().export(recording: recording) { _ in }
-        let planAsset = AVURLAsset(url: recording.exportURL)
+        // Re-exporting (as MP4/H.264) must not overwrite the first export: it
+        // should land in a numbered sibling file.
+        let planURL = try await Renderer().export(recording: recording, format: .mp4H264) { _ in }
+        guard planURL.lastPathComponent == "export 2.mp4",
+              FileManager.default.fileExists(atPath: exportURL.path),
+              recording.exportURLs == [exportURL, planURL] else {
+            throw SelfTestError.badExportName(planURL.lastPathComponent)
+        }
+        // Each export carries a snapshot of the plan that produced it.
+        guard Recording.loadPlanSegments(from: Recording.planSnapshotURL(for: planURL))?.count == 1,
+              recording.files.map(\.title) == ["Original", "Export", "Export 2"],
+              recording.files.last?.zoomCount == 1 else {
+            throw SelfTestError.badExportName("missing plan snapshot for \(planURL.lastPathComponent)")
+        }
+        let planAsset = AVURLAsset(url: planURL)
         let planDuration = try await planAsset.load(.duration).seconds
         guard abs(planDuration - duration) < 0.25 else {
             throw SelfTestError.badDuration(planDuration)
         }
-        print("selftest: edited-plan export ok — \(String(format: "%.2f", planDuration))s")
+        guard let planTrack = try await planAsset.loadTracks(withMediaType: .video).first,
+              let desc = try await planTrack.load(.formatDescriptions).first,
+              CMFormatDescriptionGetMediaSubType(desc) == kCMVideoCodecType_H264 else {
+            throw SelfTestError.noTrack
+        }
+        print("selftest: edited-plan export ok — \(planURL.lastPathComponent), \(String(format: "%.2f", planDuration))s")
+        let hevcURL = try await Renderer().export(recording: recording, format: .mp4HEVC) { _ in }
+        guard hevcURL.lastPathComponent == "export 3.mp4",
+              let hevcTrack = try await AVURLAsset(url: hevcURL).loadTracks(withMediaType: .video).first,
+              let hevcDesc = try await hevcTrack.load(.formatDescriptions).first,
+              CMFormatDescriptionGetMediaSubType(hevcDesc) == kCMVideoCodecType_HEVC else {
+            throw SelfTestError.badExportName(hevcURL.lastPathComponent)
+        }
+        print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
+
+        try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
+        print("selftest: compare diff + stacked composer ok")
 
         // Optional online leg: exercise the real AI-polish loop (spends a small
         // amount of the user's agent-CLI quota, so only on request).
@@ -102,12 +135,16 @@ enum SelfTest {
                     ?? providers.first(where: { $0.kind == .claude }) ?? providers.first else {
                 throw SelfTestError.noAIProvider
             }
-            print("selftest: AI polish via \(provider.kind.rawValue)…")
+            let model = ProcessInfo.processInfo.environment["CRISP_AI_MODEL"]
+            let effort = ProcessInfo.processInfo.environment["CRISP_AI_EFFORT"]
+            let tag = [model, effort].compactMap { $0 }.joined(separator: ", ")
+            print("selftest: AI polish via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
             let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
             let session = try AIDirector.Session(
-                provider: provider, recording: recording, meta: meta, duration: duration
+                provider: provider, model: model, effort: effort,
+                recording: recording, meta: meta, duration: duration
             )
             var restarted = false
             let report: (AIEvent) -> Void = { event in
@@ -247,11 +284,65 @@ enum SelfTest {
         try encoder.encode(meta).write(to: url)
     }
 
+    /// The editor's compare mode: plan diffing (by id and, for AI replies, by
+    /// overlap) and the stacked before/after composer.
+    private static func checkCompare(meta: RecordingMeta, width: Int, height: Int, duration: Double) throws {
+        let planner = ZoomPlanner(width: Double(width), height: Double(height))
+        func diff(_ before: [ZoomSegment], _ after: [ZoomSegment]) -> PlanDiff {
+            PlanDiff(before: before, after: after, planner: planner, duration: duration)
+        }
+        let a = ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, cx: 300, cy: 380,
+                            pans: [PanMove(t: 0.8, duration: 0.4, cx: 900, cy: 300)])
+        guard diff([a], [a]).isEmpty else { throw SelfTestError.compare("identical plans differ") }
+
+        var moved = a
+        moved.cx = 600
+        let byID = diff([a], [moved])
+        guard byID.changed == [a.id], byID.removed.isEmpty, byID.ranges.count == 1 else {
+            throw SelfTestError.compare("hand edit not detected")
+        }
+        let span = planner.motionSpan(for: a, duration: duration)
+        guard byID.ranges[0] == PlanDiff.Range(start: span.moveStart, end: span.outEnd) else {
+            throw SelfTestError.compare("range \(byID.ranges[0]) != motion span")
+        }
+
+        // AI replies come back with fresh ids and two-decimal rounding.
+        var rounded = a
+        rounded.id = UUID()
+        rounded.cx = 300.004
+        guard diff([a], [rounded]).isEmpty else { throw SelfTestError.compare("re-id'd plan reported as changed") }
+        var longer = rounded
+        longer.end = 1.7
+        let byOverlap = diff([a], [longer])
+        guard byOverlap.changed == [longer.id], byOverlap.removed.isEmpty else {
+            throw SelfTestError.compare("AI edit not paired by overlap")
+        }
+        let dropped = diff([a], [])
+        guard dropped.changed.isEmpty, dropped.removed.map(\.id) == [a.id], dropped.ranges.count == 1 else {
+            throw SelfTestError.compare("removed zoom not reported")
+        }
+
+        let composer = CompareComposer(
+            meta: meta,
+            before: planner.keyframes(from: [a], duration: duration),
+            after: planner.keyframes(from: [moved], duration: duration)
+        )
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.6))
+            .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+        let stacked = composer.compose(source: source, at: 1.0)
+        let expected = CGRect(x: 0, y: 0, width: Double(width), height: Double(height) * 2 + CompareComposer.gap)
+        guard stacked.extent == expected else {
+            throw SelfTestError.compare("stacked extent \(stacked.extent) != \(expected)")
+        }
+    }
+
     enum SelfTestError: Error {
+        case compare(String)
         case writerFailed
         case noTrack
         case badDuration(Double)
         case badSize(CGSize)
+        case badExportName(String)
         case noAIProvider
         case aiResumeFailed
         case aiIgnoredNote(segments: Int, pans: Int)

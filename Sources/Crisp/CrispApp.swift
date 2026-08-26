@@ -40,19 +40,16 @@ struct CrispApp: App {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private var appTitle: String {
-        (Bundle.main.bundleIdentifier?.hasSuffix(".dev") ?? true) ? "Crisp Dev" : "Crisp"
-    }
-
     var body: some Scene {
-        Window(appTitle, id: "main") {
+        Window("Crisp", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .themedAppearance()
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
 
-        WindowGroup("Zoom Editor", for: URL.self) { $folder in
+        WindowGroup("Crisp zoom editor", for: URL.self) { $folder in
             if let folder {
                 EditorView(folder: folder)
                     .environmentObject(model)

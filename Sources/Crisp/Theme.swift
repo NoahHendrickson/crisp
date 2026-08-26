@@ -3,40 +3,83 @@ import AppKit
 import CoreText
 
 /// Design tokens mirrored from noey-ui (src/index.css) and the Crisp v1
-/// Figma (node 23:564). Primary is the sky-blue brand (#44b4ff / #0d95ef).
+/// Figma (node 61:9313). Monochrome "ink / paper" system: light mode is ink
+/// on paper, dark mode is paper on ink. Borders use the solid `--border`
+/// swatch; secondary fills and tracks are foreground alphas so they follow
+/// the mode on their own. The sky-blue `primary` survives only as the
+/// editor's zoom accent.
 /// Control styles live in ThemeControls.swift.
 enum Theme {
-    // MARK: - Colors (light / dark from :root and .dark in index.css)
+    // MARK: - Colors (light / dark)
 
-    static let background = dynamic("#f9f6f0", "#191919")      // Figma window bg / --background
-    static let panel = dynamic("#ece9e4", "#252525")           // Figma preview panel / --card
-    static let card = dynamic("#ffffff", "#2a2a2a")            // bg-background / input/30
-    static let foreground = dynamic("#0a0a0a", "#fafafa")
-    static let textSecondary = dynamic("#525252", "#d4d4d4")
-    static let mutedForeground = dynamic("#737373", "#a1a1a1")
-    static let muted = dynamic("#f5f5f5", "#373737")
-    static let secondary = dynamic("#f5f5f5", "#373737")
-    static let secondaryHover = dynamic("#ededed", "#3f3f3f")   // color-mix(secondary, foreground 5%)
-    static let secondaryForeground = dynamic("#171717", "#fafafa")
-    static let border = dynamic("#00000014", "#ffffff1a")       // --border (light: black/8)
-    static let input = dynamic("#0000001f", "#ffffff26")        // --input  (light: black/12)
+    static let background = dynamic("#f8f7eb", "#23201e")        // --background
+    static let foreground = dynamic("#23201e", "#f8f7eb")        // --foreground / text-primary
+    static let textSecondary = dynamic("#55514f", "#d4d4d4")     // --text-secondary
+    static let mutedForeground = dynamic("#737373", "#a1a1a1")   // --muted-foreground
+    static let card = dynamic("#f8f7eb", "#2b2825")              // --card / --popover
+    static let panel = dynamic("#eeebe2", "#2b2825")             // placeholder surfaces
+    static let muted = dynamic("#23201e0f", "#ffffff14")         // ghost hover
+    static let border = dynamic("#e8e4e1", "#ffffff1f")          // --border
+    static let input = dynamic("#23201e1f", "#f8f7eb1f")         // foreground/12: select stroke
+    static let secondary = dynamic("#23201e1f", "#f8f7eb1f")     // bg-foreground/12
+    static let secondaryHover = dynamic("#23201e29", "#f8f7eb29") // bg-foreground/16
+    static let outlineHover = dynamic("#23201e0d", "#f8f7eb0d")  // bg-foreground/5
     static let ring = dynamic("#a1a1a1", "#737373")
-    static let tabsTrack = dynamic("#00000014", "#ffffff14")    // rgba(0,0,0,0.08)
+    /// Text-selection band (Figma 76:13676): sky blue at 30%.
+    static let selection = Color(red: 57 / 255, green: 147 / 255, blue: 244 / 255).opacity(0.3)
     static let destructive = dynamic("#e7000b", "#ff6467")
     static let success = dynamic("#15803d", "#4ade80")
+    /// Brand green (`--secondary`, Figma 75:11919): the zoom / pan count tag.
+    static let brand = dynamic("#359e70", "#4ade80")
+    /// `secondary/_states/selected` — brand green at 8% (16% on ink).
+    static let brandSelected = dynamic("#007e4814", "#4ade8029")
+    /// Editor timeline (Figma 76:13691): black@12 track; the selected zoom
+    /// bar is `secondary/light` with a `secondary/outlinedBorder` hairline,
+    /// the rest sit at `secondary/focusVisible` (30%).
+    static let timelineTrack = dynamic("#0000001f", "#ffffff1f")
+    static let zoomBar = dynamic("#33c27b", "#4ade80")
+    static let zoomBarBorder = dynamic("#007e4880", "#4ade8080")
+    static let zoomBarMuted = dynamic("#007e484d", "#4ade804d")
+    /// Icon/label color on the selected (solid green) zoom bar.
+    static let zoomBarForeground = dynamic("#f8f7eb", "#23201e")
+    /// Record button (Figma 43:5324) — the one saturated control.
+    static let record = Color(hex: "#ff2d57")
+
+    // Raised surface: tabs track / active tab and the progress track /
+    // indicator (tabs.tsx, progress.tsx). Light: muted + background; dark:
+    // white @12 / @16 with white @8 / @24 borders.
+    static let track = dynamic("#23201e14", "#ffffff1f")
+    static let trackBorder = dynamic("#23201e14", "#ffffff14")
+    static let raised = dynamic("#f8f7eb", "#ffffff29")
+    static let raisedBorder = dynamic("#23201e1f", "#ffffff3d")
+    /// Figma "Shadow/raised": 2px 0 8px black@8 + 3px 0 12px black@12.
+    static let raisedShadowNear = Color.black.opacity(0.08)
+    static let raisedShadowFar = Color.black.opacity(0.12)
+
+    // Tabs (Noey UI 54:372 light / 54:393 dark): flush black@8 / white@12
+    // track (rounded 6, no stroke); the active tab is paper with a
+    // foreground@12 hairline in light, white@24 with no border in dark.
+    static let tabsList = dynamic("#00000014", "#ffffff1f")
+    static let tabsActive = dynamic("#f8f7eb", "#ffffff3d")
+    static let tabsActiveBorder = dynamic("#23201e1f", "#ffffff00")
+    /// IconTabList track (Figma 174:925): solid --border in light, white@12 in dark.
+    static let iconTabsList = dynamic("#e8e4e1", "#ffffff1f")
+
+    // Zoom accent (editor timeline, crop box): the library's sky-blue primary.
     static let primary = Color(hex: "#44b4ff")
     static let primaryBorder = Color(hex: "#0d95ef")
-    static let primaryForeground = Color(hex: "#fafafa")
+    /// Label color on tinted (record / primary-blue) fills.
+    static let primaryForeground = Color(hex: "#f8f7eb")
 
     static let glossHighlight = Color.white.opacity(0.25)
     static let glossTop = Color(hex: "#d3e5fc").opacity(0.24)
     static let glossBottom = Color(hex: "#6fffff").opacity(0.5)
 
-    static let radiusSm: CGFloat = 6   // buttons, select, tabs track
-    static let radiusMd: CGFloat = 8   // tab pill, thumbnails
-    static let radiusLg: CGFloat = 16  // panels
+    static let radiusSm: CGFloat = 6   // select trigger, tags
+    static let radiusMd: CGFloat = 8   // buttons, tabs, thumbnails, panels
+    static let radiusLg: CGFloat = 16  // editor preview
 
-    static var backgroundNSColor: NSColor { nsDynamic("#f9f6f0", "#191919") }
+    static var backgroundNSColor: NSColor { nsDynamic("#f8f7eb", "#23201e") }
 
     private static func dynamic(_ light: String, _ dark: String) -> Color {
         Color(nsColor: nsDynamic(light, dark))
@@ -53,7 +96,39 @@ enum Theme {
 
     enum Weight { case regular, medium, semibold }
 
-    static func font(_ size: CGFloat, _ weight: Weight = .regular) -> Font {
+    /// The type ramp, mirroring the Noey UI text styles: Label (Geist Medium)
+    /// and Body (Geist Regular) at 12/14/16, plus three semibold headings.
+    /// Components pick from this ramp instead of carrying their own sizes.
+    enum TextStyle {
+        case label12, label14, label16
+        case body12, body14, body16
+        case heading1, heading2, heading3
+
+        var size: CGFloat {
+            switch self {
+            case .label12, .body12: 12
+            case .label14, .body14: 14
+            case .label16, .body16: 16
+            case .heading3: 20
+            case .heading2: 24
+            case .heading1: 30
+            }
+        }
+
+        var weight: Weight {
+            switch self {
+            case .body12, .body14, .body16: .regular
+            case .label12, .label14, .label16: .medium
+            case .heading1, .heading2, .heading3: .semibold
+            }
+        }
+    }
+
+    static func font(_ style: TextStyle) -> Font {
+        font(style.size, style.weight)
+    }
+
+    private static func font(_ size: CGFloat, _ weight: Weight) -> Font {
         let name: String
         switch weight {
         case .regular: name = "Geist-Regular"
@@ -181,11 +256,11 @@ struct Wordmark: View {
                     .resizable()
                     .scaledToFit()
             } else {
-                Text("Crisp").font(Theme.font(28, .semibold))
+                Text("Crisp").font(Theme.font(.heading2))
             }
         }
-        .frame(width: 69.6, height: 24)
-        .foregroundStyle(Theme.primary)
+        .frame(width: 70, height: 20)
+        .foregroundStyle(Theme.foreground)
         .accessibilityLabel("Crisp")
     }
 }

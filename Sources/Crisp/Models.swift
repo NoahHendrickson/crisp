@@ -10,6 +10,40 @@ enum MasterCodec: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
 
     var fileExtension: String { "mov" }
+
+    /// Shown under the name in the codec select.
+    var detail: String {
+        switch self {
+        case .hevc10:
+            return "10-bit color, smaller files. Best for most recordings."
+        case .proRes422:
+            return "Intra-frame master. Easier to edit, larger files."
+        case .proRes4444:
+            return "Full 4:4:4 chroma. Best gradients, ~1 GB per minute."
+        }
+    }
+}
+
+/// Container + codec used for "Export with zooms" output.
+enum ExportFormat: String, CaseIterable, Identifiable, Codable {
+    case movHEVC = "MOV (HEVC 10-bit)"
+    case mp4HEVC = "MP4 (HEVC 10-bit)"
+    case mp4H264 = "MP4 (H.264)"
+
+    var id: String { rawValue }
+
+    static let `default`: ExportFormat = .movHEVC
+    static let defaultsKey = "export.format"
+
+    /// Every extension an export can have, used when scanning a recording folder.
+    static let fileExtensions = ["mov", "mp4"]
+
+    var fileExtension: String {
+        switch self {
+        case .movHEVC: return "mov"
+        case .mp4HEVC, .mp4H264: return "mp4"
+        }
+    }
 }
 
 /// A single mouse event captured during recording.
@@ -62,6 +96,9 @@ struct PanMove: Codable, Identifiable, Equatable {
     /// Target center in master-video pixels (top-left origin).
     var cx: Double
     var cy: Double
+    /// Zoom level from this move on, for "zoom in further" steps inside a
+    /// hold. nil keeps whatever level the camera already has.
+    var zoom: Double? = nil
 }
 
 /// One zoom: the camera holds fully zoomed on (cx, cy) from `start` to `end`
@@ -103,34 +140,113 @@ struct ZoomPlan: Codable {
     var segments: [ZoomSegment]
 }
 
-/// A recording on disk: a folder containing master.mov + events.json (+ export.mov after export).
+/// A recording on disk: a folder containing master.mov + events.json
+/// (+ export.mov / export 2.mp4 / … after exports).
 struct Recording: Identifiable, Equatable {
     var id: URL { folder }
     var folder: URL
 
     var masterURL: URL { folder.appendingPathComponent("master.mov") }
     var eventsURL: URL { folder.appendingPathComponent("events.json") }
-    var exportURL: URL { folder.appendingPathComponent("export.mov") }
     var planURL: URL { folder.appendingPathComponent("plan.json") }
 
     func loadPlanSegments() -> [ZoomSegment]? {
-        guard let data = try? Data(contentsOf: planURL),
+        Self.loadPlanSegments(from: planURL)
+    }
+
+    static func loadPlanSegments(from url: URL) -> [ZoomSegment]? {
+        guard let data = try? Data(contentsOf: url),
               let plan = try? JSONDecoder().decode(ZoomPlan.self, from: data) else { return nil }
         return plan.segments
     }
 
     func savePlan(_ segments: [ZoomSegment]) {
+        Self.savePlan(segments, to: planURL)
+    }
+
+    static func savePlan(_ segments: [ZoomSegment], to url: URL) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         if let data = try? encoder.encode(ZoomPlan(segments: segments)) {
-            try? data.write(to: planURL)
+            try? data.write(to: url)
         }
+    }
+
+    /// Sidecar written next to each export with the zoom plan that produced it
+    /// ("export 2.mp4" → "export 2.plan.json"), so versions stay comparable
+    /// and restorable after plan.json has moved on.
+    static func planSnapshotURL(for exportURL: URL) -> URL {
+        let stem = exportURL.deletingPathExtension().lastPathComponent
+        return exportURL.deletingLastPathComponent().appendingPathComponent("\(stem).plan.json")
     }
 
     var name: String { folder.lastPathComponent }
 
-    var hasExport: Bool {
-        FileManager.default.fileExists(atPath: exportURL.path)
+    /// The master plus every export, for the expandable library row.
+    var files: [RecordingFile] {
+        [RecordingFile(url: masterURL, kind: .master)]
+            + exportURLs.map { RecordingFile(url: $0, kind: .export(Self.exportIndex(of: $0.deletingPathExtension().lastPathComponent) ?? 1)) }
+    }
+
+    /// Existing exports, oldest first ("export.mov", "export 2.mp4", …).
+    var exportURLs: [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names
+            .compactMap { name -> (Int, String)? in
+                let url = URL(fileURLWithPath: name)
+                guard ExportFormat.fileExtensions.contains(url.pathExtension.lowercased()),
+                      let index = Self.exportIndex(of: url.deletingPathExtension().lastPathComponent)
+                else { return nil }
+                return (index, name)
+            }
+            .sorted { $0.0 < $1.0 }
+            .map { folder.appendingPathComponent($0.1) }
+    }
+
+    var hasExport: Bool { !exportURLs.isEmpty }
+
+    /// What the library sidebar shows under a recording's name: the container
+    /// and size of the newest file (latest export, else the master), plus the
+    /// zoom and pan counts of the current plan.json.
+    struct Summary: Equatable {
+        var format: String
+        var fileSize: Int64?
+        var zoomCount: Int
+        var panCount: Int
+    }
+
+    var summary: Summary {
+        let url = exportURLs.last ?? masterURL
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
+        let segments = loadPlanSegments() ?? []
+        return Summary(
+            format: url.pathExtension.uppercased(),
+            fileSize: size,
+            zoomCount: segments.count,
+            panCount: segments.reduce(0) { $0 + $1.pans.count }
+        )
+    }
+
+    /// Next unused export filename: "export.<ext>", then "export 2.<ext>",
+    /// "export 3.<ext>", … Numbering is shared across formats so re-exports
+    /// never overwrite an earlier one, whatever container it used.
+    func nextExportURL(for format: ExportFormat) -> URL {
+        let used = Set(exportURLs.compactMap {
+            Self.exportIndex(of: $0.deletingPathExtension().lastPathComponent)
+        })
+        var index = 1
+        while used.contains(index) { index += 1 }
+        let stem = index == 1 ? "export" : "export \(index)"
+        return folder.appendingPathComponent(stem).appendingPathExtension(format.fileExtension)
+    }
+
+    /// "export" → 1, "export 2" → 2, anything else → nil.
+    private static func exportIndex(of stem: String) -> Int? {
+        if stem == "export" { return 1 }
+        guard stem.hasPrefix("export "), let n = Int(stem.dropFirst("export ".count)), n >= 2 else {
+            return nil
+        }
+        return n
     }
 
     static func library() -> URL {
@@ -162,5 +278,49 @@ struct Recording: Identifiable, Equatable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(RecordingMeta.self, from: data)
+    }
+}
+
+/// One video inside a recording folder: the original master or a numbered export.
+struct RecordingFile: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case master
+        case export(Int)
+    }
+
+    var id: URL { url }
+    let url: URL
+    let kind: Kind
+
+    var isMaster: Bool { kind == .master }
+
+    /// "Original", "Export", "Export 2", …
+    var title: String {
+        switch kind {
+        case .master: return "Original"
+        case .export(let n): return n == 1 ? "Export" : "Export \(n)"
+        }
+    }
+
+    /// "MOV" / "MP4"
+    var format: String { url.pathExtension.uppercased() }
+
+    var planSnapshotURL: URL? {
+        isMaster ? nil : Recording.planSnapshotURL(for: url)
+    }
+
+    /// Number of zooms in this export's plan snapshot; nil for the master or
+    /// exports made before snapshots existed.
+    var zoomCount: Int? {
+        guard let planSnapshotURL else { return nil }
+        return Recording.loadPlanSegments(from: planSnapshotURL)?.count
+    }
+
+    var fileSize: Int64? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
+    }
+
+    var modifiedAt: Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 }

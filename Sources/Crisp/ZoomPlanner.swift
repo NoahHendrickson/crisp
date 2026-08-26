@@ -104,20 +104,24 @@ struct ZoomPlanner {
             appendHoldIfGap(&keys, at: moveStart, fullFrame: fullFrame)
             keys.append(Keyframe(t: arrive, camera: Camera(zoom: seg.zoom, center: center)))
 
-            // Pan moves inside the hold window, in order.
+            // Pan moves inside the hold window, in order. A move that carries
+            // its own zoom level tightens (or loosens) the camera as it glides.
             var lastT = arrive
+            var level = seg.zoom
             for pan in seg.pans.sorted(by: { $0.t < $1.t }) {
                 let panStart = min(max(pan.t, seg.start), end)
                 let panEnd = min(panStart + max(0.1, pan.duration), end)
                 guard panEnd > lastT else { continue }
-                let target = clampedCenter(CGPoint(x: pan.cx, y: pan.cy), zoom: seg.zoom)
-                keys.append(Keyframe(t: max(panStart, lastT), camera: Camera(zoom: seg.zoom, center: center)))
-                keys.append(Keyframe(t: panEnd, camera: Camera(zoom: seg.zoom, center: target)))
+                let targetLevel = pan.zoom ?? level
+                let target = clampedCenter(CGPoint(x: pan.cx, y: pan.cy), zoom: targetLevel)
+                keys.append(Keyframe(t: max(panStart, lastT), camera: Camera(zoom: level, center: center)))
+                keys.append(Keyframe(t: panEnd, camera: Camera(zoom: targetLevel, center: target)))
                 center = target
+                level = targetLevel
                 lastT = panEnd
             }
 
-            keys.append(Keyframe(t: end, camera: Camera(zoom: seg.zoom, center: center)))
+            keys.append(Keyframe(t: end, camera: Camera(zoom: level, center: center)))
             keys.append(Keyframe(t: min(end + config.zoomOutDuration, duration), camera: fullFrame))
         }
 
@@ -135,6 +139,19 @@ struct ZoomPlanner {
             }
         }
         return cleaned
+    }
+
+    /// The camera-motion window of a segment: the zoom-in ramp begins
+    /// `leadIn` early and the zoom-out eases back after the hold ends.
+    /// Mirrors `keyframes(from:duration:)`.
+    func motionSpan(
+        for seg: ZoomSegment, duration: Double
+    ) -> (moveStart: Double, arrive: Double, end: Double, outEnd: Double) {
+        let moveStart = max(0, seg.start - config.leadIn)
+        let arrive = min(moveStart + config.zoomInDuration, max(seg.start, moveStart + 0.05))
+        let end = min(seg.end, duration)
+        let outEnd = min(end + config.zoomOutDuration, duration)
+        return (moveStart, arrive, end, outEnd)
     }
 
     /// Camera state at time t, smoothstep-eased between keyframes.

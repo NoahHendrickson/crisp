@@ -5,7 +5,8 @@ import CoreImage
 import VideoToolbox
 
 /// Offline export: reads the master file, applies the animated zoom camera,
-/// re-draws the cursor and click ripples, and writes a high-bitrate HEVC export.
+/// re-draws the cursor and click ripples, and writes a high-bitrate export in
+/// the requested container/codec.
 ///
 /// Renders on a fixed 60fps output clock (the master has variable frame timing
 /// because ScreenCaptureKit only emits frames on screen changes — the camera
@@ -25,7 +26,14 @@ final class Renderer {
         ])
     }()
 
-    func export(recording: Recording, progress: @escaping (Double) -> Void) async throws {
+    /// Writes a new, never-overwriting export file next to the master and
+    /// returns its URL.
+    @discardableResult
+    func export(
+        recording: Recording,
+        format: ExportFormat = .default,
+        progress: @escaping (Double) -> Void
+    ) async throws -> URL {
         let meta = try recording.loadMeta()
         let asset = AVURLAsset(url: recording.masterURL)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -51,21 +59,14 @@ final class Renderer {
         readerOutput.alwaysCopiesSampleData = false
         reader.add(readerOutput)
 
-        // Writer: 10-bit HEVC, high bitrate.
-        try? FileManager.default.removeItem(at: recording.exportURL)
-        let writer = try AVAssetWriter(outputURL: recording.exportURL, fileType: .mov)
-        let bitrate = min(max(Double(width * height) * fps * 0.12, 15_000_000), 100_000_000)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: Int(bitrate),
-                AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main10_AutoLevel as String,
-                AVVideoExpectedSourceFrameRateKey: Int(fps),
-                AVVideoMaxKeyFrameIntervalKey: Int(fps) * 2,
-            ],
-        ])
+        // Writer: high bitrate in the chosen container/codec. Each export gets a
+        // fresh numbered filename so earlier exports are never overwritten.
+        let outputURL = recording.nextExportURL(for: format)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: Self.fileType(for: format))
+        let input = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: Self.videoSettings(format: format, width: width, height: height, fps: fps)
+        )
         input.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
@@ -136,7 +137,47 @@ final class Renderer {
         input.markAsFinished()
         await writer.finishWriting()
         if let error = writer.error { throw error }
+        // Remember which zooms produced this file, so the library can compare
+        // and restore versions after plan.json changes.
+        Recording.savePlan(segments, to: Recording.planSnapshotURL(for: outputURL))
         progress(1)
+        return outputURL
+    }
+
+    // MARK: - Encoder settings
+
+    static func fileType(for format: ExportFormat) -> AVFileType {
+        switch format {
+        case .movHEVC: return .mov
+        case .mp4HEVC, .mp4H264: return .mp4
+        }
+    }
+
+    static func videoSettings(format: ExportFormat, width: Int, height: Int, fps: Double) -> [String: Any] {
+        let bitrate = min(max(Double(width * height) * fps * 0.12, 15_000_000), 100_000_000)
+        let codec: AVVideoCodecType
+        let profile: String
+        switch format {
+        case .movHEVC, .mp4HEVC:
+            codec = .hevc
+            profile = kVTProfileLevel_HEVC_Main10_AutoLevel as String
+        case .mp4H264:
+            // 8-bit, for players that can't decode HEVC. VideoToolbox downconverts
+            // from the half-float frames we render.
+            codec = .h264
+            profile = AVVideoProfileLevelH264HighAutoLevel
+        }
+        return [
+            AVVideoCodecKey: codec,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: Int(bitrate),
+                AVVideoProfileLevelKey: profile,
+                AVVideoExpectedSourceFrameRateKey: Int(fps),
+                AVVideoMaxKeyFrameIntervalKey: Int(fps) * 2,
+            ],
+        ]
     }
 
     enum RenderError: LocalizedError {
