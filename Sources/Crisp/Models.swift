@@ -60,11 +60,19 @@ struct MouseEvent: Codable {
     var y: Double
 }
 
+/// Appearance of the system cursor at a sample. Missing/nil in JSON is arrow
+/// (old recordings, and ticks where the cursor was the default arrow).
+enum CursorKind: String, Codable {
+    case arrow, pointer, iBeam
+}
+
 /// Periodic cursor position sample, same coordinate space as MouseEvent.
 struct CursorSample: Codable {
     var t: Double
     var x: Double
     var y: Double
+    /// nil = arrow. Omitted from JSON so arrow ticks stay `{t,x,y}`.
+    var kind: CursorKind? = nil
 }
 
 /// Sidecar metadata written next to master.mov as events.json.
@@ -87,38 +95,65 @@ struct RecordingMeta: Codable {
     var samples: [CursorSample]
 }
 
-/// A camera move within a zoom segment: at time `t` the camera glides from its
-/// current center to (cx, cy) over `duration` seconds, staying zoomed.
-struct PanMove: Codable, Identifiable, Equatable {
+/// A mid-hold zoom keyframe: from `t` the camera eases to `zoom` (over the
+/// planner's `stepDuration`) and holds it for the rest of the zoom.
+struct ZoomStep: Codable, Identifiable, Equatable {
     var id = UUID()
     var t: Double
-    var duration: Double = 0.5
-    /// Target center in master-video pixels (top-left origin).
-    var cx: Double
-    var cy: Double
-    /// Zoom level from this move on, for "zoom in further" steps inside a
-    /// hold. nil keeps whatever level the camera already has.
-    var zoom: Double? = nil
+    var zoom: Double
 }
 
-/// One zoom: the camera holds fully zoomed on (cx, cy) from `start` to `end`
-/// (seconds, master-video timeline); eased transitions are added around it.
-/// `pans` are re-centering moves that happen while zoomed.
+/// A stretch of a zoom's hold where the camera holds a fixed framing
+/// instead of following the cursor — for action that isn't under the
+/// mouse. `x`/`y` are master-video pixels; `from`/`until` are seconds on
+/// the master timeline, nil meaning the hold's start / end. A zoom can
+/// carry several, one after another; a pin with no `until` is "open":
+/// it holds to the end of the zoom until the user releases it.
+struct PinWindow: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var x: Double
+    var y: Double
+    var from: Double? = nil
+    var until: Double? = nil
+
+    var point: CGPoint {
+        get { CGPoint(x: x, y: y) }
+        set { x = Double(newValue.x); y = Double(newValue.y) }
+    }
+}
+
+/// One zoom: the camera holds fully zoomed at `zoom` from `start` to `end`
+/// (seconds, master-video timeline); eased transitions are added around it
+/// and the framing follows the recorded cursor automatically. `steps` change
+/// the level part-way through the hold; `pins` hold the framing still for
+/// parts of it.
 struct ZoomSegment: Codable, Identifiable, Equatable {
     var id = UUID()
     var start: Double
     var end: Double
     var zoom: Double
-    /// Initial center in master-video pixels (top-left origin).
-    var cx: Double
-    var cy: Double
-    var pans: [PanMove] = []
+    var steps: [ZoomStep] = []
+    var pins: [PinWindow] = []
+    /// Ease-in / ease-out length in seconds. nil = the planner defaults
+    /// (`zoomInDuration` / `zoomOutDuration`). A longer zoom-in starts the
+    /// camera earlier so it still arrives at the hold on time, just slower.
+    var zoomIn: Double? = nil
+    var zoomOut: Double? = nil
 }
 
-/// Custom decoding so plan.json files written before pans existed still load.
+/// Lenient decoding: plans written before steps existed load, plans from
+/// the era of hand-placed pans keep their "zoom in further" moves as steps
+/// (their centres are dropped — the follower frames the shot now), and a
+/// plan's single `pinX`/`pinY`/`pinFrom`/`pinUntil` becomes its one pin.
 extension ZoomSegment {
     private enum CodingKeys: String, CodingKey {
-        case id, start, end, zoom, cx, cy, pans
+        case id, start, end, zoom, steps, pans, pins, pinX, pinY, pinFrom, pinUntil, zoomIn, zoomOut
+    }
+
+    private struct LegacyPan: Decodable {
+        var id: UUID?
+        var t: Double
+        var zoom: Double?
     }
 
     init(from decoder: Decoder) throws {
@@ -127,9 +162,38 @@ extension ZoomSegment {
         start = try container.decode(Double.self, forKey: .start)
         end = try container.decode(Double.self, forKey: .end)
         zoom = try container.decode(Double.self, forKey: .zoom)
-        cx = try container.decode(Double.self, forKey: .cx)
-        cy = try container.decode(Double.self, forKey: .cy)
-        pans = try container.decodeIfPresent([PanMove].self, forKey: .pans) ?? []
+        var steps = try container.decodeIfPresent([ZoomStep].self, forKey: .steps) ?? []
+        if steps.isEmpty, let pans = try? container.decodeIfPresent([LegacyPan].self, forKey: .pans) {
+            steps = pans.compactMap { pan in
+                pan.zoom.map { ZoomStep(id: pan.id ?? UUID(), t: pan.t, zoom: $0) }
+            }
+        }
+        self.steps = steps
+        var pins = try container.decodeIfPresent([PinWindow].self, forKey: .pins) ?? []
+        if pins.isEmpty,
+           let x = try container.decodeIfPresent(Double.self, forKey: .pinX),
+           let y = try container.decodeIfPresent(Double.self, forKey: .pinY) {
+            pins = [PinWindow(
+                x: x, y: y,
+                from: try container.decodeIfPresent(Double.self, forKey: .pinFrom),
+                until: try container.decodeIfPresent(Double.self, forKey: .pinUntil)
+            )]
+        }
+        self.pins = pins
+        zoomIn = try container.decodeIfPresent(Double.self, forKey: .zoomIn)
+        zoomOut = try container.decodeIfPresent(Double.self, forKey: .zoomOut)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(zoom, forKey: .zoom)
+        try container.encode(steps, forKey: .steps)
+        if !pins.isEmpty { try container.encode(pins, forKey: .pins) }
+        try container.encodeIfPresent(zoomIn, forKey: .zoomIn)
+        try container.encodeIfPresent(zoomOut, forKey: .zoomOut)
     }
 }
 
@@ -217,7 +281,7 @@ struct Recording: Identifiable, Equatable {
         var format: String
         var fileSize: Int64?
         var zoomCount: Int
-        var panCount: Int
+        var stepCount: Int
     }
 
     var summary: Summary {
@@ -228,7 +292,7 @@ struct Recording: Identifiable, Equatable {
             format: url.pathExtension.uppercased(),
             fileSize: size,
             zoomCount: segments.count,
-            panCount: segments.reduce(0) { $0 + $1.pans.count }
+            stepCount: segments.reduce(0) { $0 + $1.steps.count }
         )
     }
 

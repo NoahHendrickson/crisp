@@ -1,256 +1,230 @@
 import SwiftUI
-import AVFoundation
-import AppKit
 
-// The editor's inspector: slider panels for the selected zoom or pan, and
-// the actions that add pans / zoom-in steps inside a zoom.
+// What the toolbar edits at the playhead: the zoom level in effect there
+// and whether the camera follows the cursor or holds a pinned viewport.
+// Both come alive inside a zoom's hold and grey out elsewhere. Timing is
+// edited by dragging the timeline, so there is deliberately little to set
+// by hand — the AI editor does the editorial work.
 extension EditorView {
-    // MARK: - Inspector
+    // MARK: - Where the playhead is
 
-    var selectedSegmentIndex: Int? {
-        switch selection {
-        case .segment(let id), .pan(segment: let id, pan: _):
-            return segments.firstIndex { $0.id == id }
-        case nil:
-            return nil
+    /// The zoom whose hold (start…end) the playhead is in.
+    var holdIndexAtPlayhead: Int? {
+        segments.firstIndex {
+            currentTime >= $0.start - Self.keyframeSlop && currentTime <= $0.end + Self.keyframeSlop
         }
     }
 
-    @ViewBuilder
-    var inspector: some View {
-        if case .pan(let segID, let panID) = selection,
-           let segIndex = segments.firstIndex(where: { $0.id == segID }),
-           let panIndex = segments[segIndex].pans.firstIndex(where: { $0.id == panID }),
-           let meta {
-            panInspector(segIndex: segIndex, panIndex: panIndex, meta: meta)
-        } else if let index = selectedSegmentIndex, let meta {
-            let seg = segments[index]
-            GroupBox {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                    GridRow {
-                        Text("Start")
-                        ThemedSlider(
-                            value: Binding(
-                                get: { segments[index].start },
-                                set: { segments[index].start = min($0, segments[index].end - 0.2) }
-                            ),
-                            in: 0...duration
-                        )
-                        Text(timecode(seg.start))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("End")
-                        ThemedSlider(
-                            value: Binding(
-                                get: { segments[index].end },
-                                set: { segments[index].end = max($0, segments[index].start + 0.2) }
-                            ),
-                            in: 0...duration
-                        )
-                        Text(timecode(seg.end))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Zoom")
-                        ThemedSlider(
-                            value: Binding(
-                                get: { segments[index].zoom },
-                                set: { segments[index].zoom = $0 }
-                            ),
-                            in: Self.zoomRange
-                        )
-                        Text(String(format: "%.1f×", seg.zoom))
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Center X")
-                        ThemedSlider(
-                            value: Binding(
-                                get: { segments[index].cx },
-                                set: { segments[index].cx = $0 }
-                            ),
-                            in: 0...Double(meta.pixelWidth)
-                        )
-                        Text("\(Int(seg.cx))px")
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                    GridRow {
-                        Text("Center Y")
-                        ThemedSlider(
-                            value: Binding(
-                                get: { segments[index].cy },
-                                set: { segments[index].cy = $0 }
-                            ),
-                            in: 0...Double(meta.pixelHeight)
-                        )
-                        Text("\(Int(seg.cy))px")
-                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
-                    }
-                }
-                HStack {
-                    Button("Preview This Zoom") {
-                        startLivePreview(from: max(0, seg.start - 1.2))
-                    }
-                    .buttonStyle(.themed(.outline, size: .xs))
-                    .tooltip("Play this zoom with the real camera, starting just before it")
-                    Button("Add Pan at Playhead") {
-                        addPanAtPlayhead(segIndex: index)
-                    }
-                    .buttonStyle(.themed(.outline, size: .xs))
-                    .tooltip("Insert a camera pan inside this zoom at the current playhead")
-                    Button("Zoom In Further at Playhead") {
-                        addZoomStepAtPlayhead(segIndex: index)
-                    }
-                    .buttonStyle(.themed(.outline, size: .xs))
-                    .tooltip("Tighten the zoom from the playhead on, without zooming back out first")
-                    Spacer()
-                    Button("Remove Zoom", role: .destructive) {
-                        segments.remove(at: index)
-                        select(nil)
-                    }
-                    .buttonStyle(.themed(.destructive, size: .xs))
-                    .tooltip("Delete this zoom and its pans")
-                }
-                .padding(.top, 4)
-            } label: {
-                Text("Selected Zoom")
-                    .font(.callout.weight(.medium))
-            }
+    /// The pin whose window contains the playhead.
+    func pinIDAtPlayhead(in seg: ZoomSegment) -> UUID? {
+        pinWindows(for: seg).first {
+            currentTime >= $0.from - Self.keyframeSlop && currentTime <= $0.until + Self.keyframeSlop
+        }?.id
+    }
+
+    /// A pin still waiting for its release (`until == nil`): it holds to
+    /// the end of the zoom until Unpin closes it, and no other pin can be
+    /// started in that zoom meanwhile.
+    func openPin(in seg: ZoomSegment) -> PinWindow? {
+        seg.pins.first { $0.until == nil }
+    }
+
+    // MARK: - Level
+
+    /// The level in effect at the playhead, editable only inside a hold and
+    /// not mid-way through a step's ease: the step's level once one has
+    /// eased in, else the zoom's own. Elsewhere it is the camera's
+    /// interpolated level, read-only.
+    var playheadLevel: (value: Binding<Double>, editable: Bool) {
+        guard let i = holdIndexAtPlayhead, !isMidStep(in: segments[i]) else {
+            return (.constant(camera(at: currentTime).zoom), false)
+        }
+        if let s = activeStepIndex(in: segments[i]) {
+            return ($segments[i].steps[s].zoom, true)
+        }
+        return ($segments[i].zoom, true)
+    }
+
+    var levelHelp: String {
+        if playheadLevel.editable {
+            return "Zoom level from here on — the crop box corners set it too"
+        }
+        return holdIndexAtPlayhead == nil
+            ? "Zoom level here — park the playhead inside a zoom to change it"
+            : "The level is changing here"
+    }
+
+    // MARK: - Pin cycle
+
+    /// What the pin control does at the playhead. Pin starts a pin here —
+    /// the framing the follower has at this moment, held to the end of the
+    /// zoom until released; Unpin closes the zoom's open pin here. Pins are
+    /// added one cycle at a time: Pin, scrub ahead, Unpin.
+    enum PinMove { case pin, unpin }
+
+    var pinMove: PinMove {
+        guard let i = holdIndexAtPlayhead, openPin(in: segments[i]) != nil else { return .pin }
+        return .unpin
+    }
+
+    var pinMoveEnabled: Bool {
+        guard let i = holdIndexAtPlayhead else { return false }
+        let seg = segments[i]
+        switch pinMove {
+        case .pin: return pinIDAtPlayhead(in: seg) == nil && currentTime <= seg.end - 0.1
+        case .unpin: return true
         }
     }
 
-    func panInspector(segIndex: Int, panIndex: Int, meta: RecordingMeta) -> some View {
-        let seg = segments[segIndex]
-        let pan = seg.pans[panIndex]
-        return GroupBox {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text("Starts at")
-                    ThemedSlider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].t },
-                            set: { segments[segIndex].pans[panIndex].t = $0 }
-                        ),
-                        in: seg.start...max(seg.start + 0.1, seg.end - 0.1)
-                    )
-                    Text(timecode(pan.t))
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Travel time")
-                    ThemedSlider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].duration },
-                            set: { segments[segIndex].pans[panIndex].duration = $0 }
-                        ),
-                        in: 0.15...1.5
-                    )
-                    Text(String(format: "%.2fs", pan.duration))
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Zoom")
-                    ThemedSlider(
-                        value: panZoomBinding(segIndex: segIndex, panIndex: panIndex),
-                        in: Self.zoomRange
-                    )
-                    Text(String(format: "%.1f×", zoomLevel(in: seg, after: pan)))
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Pan to X")
-                    ThemedSlider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].cx },
-                            set: { segments[segIndex].pans[panIndex].cx = $0 }
-                        ),
-                        in: 0...Double(meta.pixelWidth)
-                    )
-                    Text("\(Int(pan.cx))px")
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-                GridRow {
-                    Text("Pan to Y")
-                    ThemedSlider(
-                        value: Binding(
-                            get: { segments[segIndex].pans[panIndex].cy },
-                            set: { segments[segIndex].pans[panIndex].cy = $0 }
-                        ),
-                        in: 0...Double(meta.pixelHeight)
-                    )
-                    Text("\(Int(pan.cy))px")
-                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
+    var pinHelp: String {
+        guard let i = holdIndexAtPlayhead else {
+            return "Park the playhead inside a zoom to pin the viewport there"
+        }
+        let seg = segments[i]
+        switch pinMove {
+        case .pin:
+            if pinIDAtPlayhead(in: seg) != nil {
+                return "The viewport is already pinned here — drag the orange band's edges on the timeline to change when"
             }
-            HStack {
-                Button("Preview This Pan") {
-                    startLivePreview(from: max(0, pan.t - 1.0))
-                }
-                .buttonStyle(.themed(.outline, size: .xs))
-                .tooltip("Play this pan with the real camera, starting just before it")
-                Spacer()
-                Button("Remove Pan", role: .destructive) {
-                    segments[segIndex].pans.remove(at: panIndex)
-                    select(.segment(seg.id))
-                }
-                .buttonStyle(.themed(.destructive, size: .xs))
-                .tooltip("Delete this pan; the zoom stays")
+            if currentTime > seg.end - 0.1 { return "Too close to the end of this zoom to pin" }
+            return "Hold the viewport where the camera is right now, from here to the end of this zoom. Scrub ahead and Unpin where it should follow the cursor again; drag the crop box to move the pinned spot"
+        case .unpin:
+            let from = openPin(in: seg)?.from ?? seg.start
+            return currentTime <= from + 0.1
+                ? "Drop this pin"
+                : "Let the camera follow the cursor again from here"
+        }
+    }
+
+    func pinViewport() {
+        guard let i = holdIndexAtPlayhead, pinMove == .pin, pinMoveEnabled else { return }
+        let seg = segments[i]
+        let t = currentTime
+        let center = camera(at: t).center
+        segments[i].pins.append(PinWindow(
+            x: center.x, y: center.y,
+            from: t <= seg.start + 0.1 ? nil : t
+        ))
+    }
+
+    func unpinViewport() {
+        guard let i = holdIndexAtPlayhead, let open = openPin(in: segments[i]),
+              let p = segments[i].pins.firstIndex(where: { $0.id == open.id }) else { return }
+        let seg = segments[i]
+        let from = open.from ?? seg.start
+        if currentTime <= from + 0.1 {
+            segments[i].pins.remove(at: p)
+        } else {
+            segments[i].pins[p].until = min(currentTime, seg.end)
+        }
+    }
+
+    // MARK: - Toolbar groups
+
+    /// "Pin viewport at 0:42" (Figma 93:746): one button whose small square
+    /// carries the action and whose well shows the playhead's time.
+    var pinControl: some View {
+        let move = pinMove
+        let enabled = pinMoveEnabled
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+        return Button {
+            switch move {
+            case .pin: pinViewport()
+            case .unpin: unpinViewport()
             }
-            .padding(.top, 4)
         } label: {
-            Text("Selected \(pan.zoom == nil ? "Pan" : "Zoom-in") (in zoom \(timecode(seg.start))–\(timecode(seg.end)))")
-                .font(.callout.weight(.medium))
+            HStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    Icon(name: move == .pin ? "plus" : "x", size: 16, fallback: move == .pin ? "plus" : "xmark")
+                        .foregroundStyle(Theme.foreground)
+                        .frame(width: 28, height: 28)
+                        .background {
+                            shape.fill(Theme.background)
+                                .overlay(shape.strokeBorder(Theme.input, lineWidth: 1))
+                        }
+                    Text(move == .pin ? "Pin viewport at" : "Unpin viewport at")
+                        .font(Theme.font(.label12))
+                        .foregroundStyle(Theme.mutedForeground)
+                }
+                .padding(.leading, 2)
+                ToolbarField(text: timecodeShort(currentTime))
+                    .padding(.trailing, 1)
+            }
+            .frame(height: ControlSizeToken.md.height)
+            .background(shape.fill(Theme.iconTabsList))
+            .contentShape(shape)
         }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+        .tooltip(pinHelp)
+    }
+}
+
+/// "Zoom  −  1.8×  +" (Figma 93:697): a muted group with the level in a
+/// well between two 12pt steppers, in tenths, clamped to the editor's range.
+struct LevelStepper: View {
+    @Binding var level: Double
+    let range: ClosedRange<Double>
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("Zoom")
+                .font(Theme.font(.label12))
+                .foregroundStyle(Theme.mutedForeground)
+                .padding(.horizontal, 8)
+            HStack(spacing: 4) {
+                step(icon: "minus", fallback: "minus", help: "Zoom out a little",
+                     disabled: level <= range.lowerBound + 0.001) {
+                    level = max(range.lowerBound, ((level - 0.1) * 10).rounded() / 10)
+                }
+                ToolbarField(text: String(format: "%.1f×", level), width: 40)
+                step(icon: "plus", fallback: "plus", help: "Zoom in a little",
+                     disabled: level >= range.upperBound - 0.001) {
+                    level = min(range.upperBound, ((level + 0.1) * 10).rounded() / 10)
+                }
+            }
+            .padding(.horizontal, 7)
+        }
+        .frame(height: ControlSizeToken.md.height)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).fill(Theme.iconTabsList))
+        .opacity(isEnabled ? 1 : 0.5)
     }
 
-    /// Switch to the preview tab (real camera) and play from `t`.
-    func startLivePreview(from t: Double) {
-        viewMode = .preview
-        seek(to: t)
-        player.play()
+    private func step(icon: String, fallback: String, help: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Icon(name: icon, size: 12, fallback: fallback)
+                .foregroundStyle(Theme.foreground)
+                .frame(width: 16, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .disabled(disabled)
+        .opacity(disabled ? 0.4 : 1)
+        .tooltip(help)
     }
+}
 
-    func addPanAtPlayhead(segIndex: Int) {
-        guard let meta else { return }
-        let seg = segments[segIndex]
-        let t = min(max(currentTime, seg.start), max(seg.start, seg.end - 0.2))
-        // Aim at wherever the cursor was shortly after the pan begins.
-        let p = FrameComposer.cursorPosition(samples: meta.samples, at: t + 0.4)
-        let pan = PanMove(
-            t: t, duration: 0.5,
-            cx: p?.x ?? Double(meta.pixelWidth) / 2,
-            cy: p?.y ?? Double(meta.pixelHeight) / 2
-        )
-        segments[segIndex].pans.append(pan)
-        select(.pan(segment: seg.id, pan: pan.id))
-    }
+/// A read-only value well inside a toolbar group (Figma 93:745): paper
+/// with a foreground@24 hairline, 28pt, Body/12.
+struct ToolbarField: View {
+    let text: String
+    var width: CGFloat? = nil
 
-    /// A pan at the playhead that also steps the zoom up half a level
-    /// (capped at the range), aimed at the cursor like a plain pan.
-    func addZoomStepAtPlayhead(segIndex: Int) {
-        guard let meta else { return }
-        let seg = segments[segIndex]
-        let t = min(max(currentTime, seg.start), max(seg.start, seg.end - 0.2))
-        let level = min(zoomLevel(in: seg, at: t) + 0.5, Self.zoomRange.upperBound)
-        let p = FrameComposer.cursorPosition(samples: meta.samples, at: t + 0.4)
-        let pan = PanMove(
-            t: t, duration: 0.5,
-            cx: p?.x ?? seg.cx,
-            cy: p?.y ?? seg.cy,
-            zoom: level
-        )
-        segments[segIndex].pans.append(pan)
-        select(.pan(segment: seg.id, pan: pan.id))
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusMd - 1, style: .continuous)
+        Text(text)
+            .font(Theme.font(.body12))
+            .monospacedDigit()
+            .foregroundStyle(Theme.foreground)
+            .padding(.horizontal, 8)
+            .frame(width: width, height: 28)
+            .background {
+                shape.fill(Theme.background)
+                    .overlay(shape.strokeBorder(Theme.fieldBorder, lineWidth: 1))
+            }
     }
 }

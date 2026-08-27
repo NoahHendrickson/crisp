@@ -33,15 +33,19 @@ enum Theme {
     static let brand = dynamic("#359e70", "#4ade80")
     /// `secondary/_states/selected` — brand green at 8% (16% on ink).
     static let brandSelected = dynamic("#007e4814", "#4ade8029")
-    /// Editor timeline (Figma 76:13691): black@12 track; the selected zoom
-    /// bar is `secondary/light` with a `secondary/outlinedBorder` hairline,
-    /// the rest sit at `secondary/focusVisible` (30%).
+    /// Editor timeline (Figma 93:1015): a black@12 track; the video row is
+    /// `secondary/light`, zoom holds are blue, pinned stretches orange, all
+    /// with a white@50 hairline; ruler ticks black@24.
     static let timelineTrack = dynamic("#0000001f", "#ffffff1f")
-    static let zoomBar = dynamic("#33c27b", "#4ade80")
-    static let zoomBarBorder = dynamic("#007e4880", "#4ade8080")
-    static let zoomBarMuted = dynamic("#007e484d", "#4ade804d")
-    /// Icon/label color on the selected (solid green) zoom bar.
-    static let zoomBarForeground = dynamic("#f8f7eb", "#23201e")
+    static let videoBar = dynamic("#33c27b", "#4ade80")
+    static let zoomBar = dynamic("#47a6ff", "#47a6ff")
+    static let pinBar = dynamic("#ff9a42", "#ff9a42")
+    static let pinBarBorder = dynamic("#ffe19a", "#ffe19a")
+    static let barBorder = Color.white.opacity(0.5)
+    static let ruler = dynamic("#0000003d", "#ffffff3d")
+    /// Value wells in the toolbar's Zoom / Pin groups (Figma 93:745):
+    /// paper with a foreground@24 hairline.
+    static let fieldBorder = dynamic("#23201e3d", "#f8f7eb3d")
     /// Record button (Figma 43:5324) — the one saturated control.
     static let record = Color(hex: "#ff2d57")
 

@@ -13,6 +13,8 @@ struct AIMessage: Identifiable {
     let id = UUID()
     var role: Role
     var text: String
+    /// The moment (seconds) a user note was about, attached from the playhead.
+    var timestamp: Double? = nil
     /// Tool steps the agent took before replying.
     var activities: [Activity] = []
     /// Plan in effect before this reply was applied — enables "Revert".
@@ -103,7 +105,7 @@ final class AIChat: ObservableObject {
     /// `apply` is called on the main actor with the validated new plan, after
     /// every streamed event has landed in the transcript.
     func send(
-        note: String,
+        note: String, timestamp: Double? = nil,
         recording: Recording, meta: RecordingMeta, duration: Double,
         segments: [ZoomSegment],
         apply: @escaping ([ZoomSegment]) -> Void
@@ -124,7 +126,8 @@ final class AIChat: ObservableObject {
         guard let session else { return }
 
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        messages.append(AIMessage(role: .user, text: trimmed.isEmpty ? "Polish with the default brief" : trimmed))
+        messages.append(AIMessage(role: .user, text: trimmed.isEmpty ? "Polish with the default brief" : trimmed,
+                                  timestamp: timestamp))
         let reply = AIMessage(role: .assistant, text: "")
         messages.append(reply)
         running = true
@@ -136,10 +139,10 @@ final class AIChat: ObservableObject {
             // drained here, on the main actor, before the outcome is handled —
             // so the transcript is complete when the plan is applied.
             let (events, continuation) = AsyncStream<AIEvent>.makeStream()
-            async let outcome: Result<[ZoomSegment], Error> = {
+            async let outcome: Result<AIDirector.Outcome, Error> = {
                 defer { continuation.finish() }
                 do {
-                    return .success(try await session.send(note: trimmed, segments: segments) { continuation.yield($0) })
+                    return .success(try await session.send(note: trimmed, timestamp: timestamp, segments: segments) { continuation.yield($0) })
                 } catch {
                     return .failure(error)
                 }
@@ -150,11 +153,16 @@ final class AIChat: ObservableObject {
             let result = await outcome
             guard turnID == myTurn else { return }   // superseded by clear()/a newer turn
             switch result {
-            case .success(let plan):
+            case .success(let outcome):
+                let plan = outcome.plan
+                let steps = plan.reduce(0) { $0 + $1.steps.count }
                 update(reply.id) {
                     $0.before = segments
                     $0.after = plan
-                    $0.append(paragraph: "Applied: \(segments.count) → \(plan.count) zooms.")
+                    $0.append(paragraph: "Applied: \(segments.count) → \(plan.count) zooms" + (steps > 0 ? ", \(steps) zoom-in \(steps == 1 ? "step" : "steps")." : "."))
+                    if !outcome.adjustments.isEmpty {
+                        $0.append(paragraph: "Adjusted to fit the rules:\n" + outcome.adjustments.map { "• \($0)" }.joined(separator: "\n"))
+                    }
                 }
                 hasStarted = true
                 apply(plan)
@@ -208,6 +216,11 @@ struct AIPanelView: View {
     let recording: Recording
     let meta: RecordingMeta?
     let duration: Double
+    /// The editor's playhead, offered as "Attach timestamp".
+    let currentTime: Double
+    /// A moment attached to the next note (Figma 83:14758); the editor's
+    /// "Send timestamp to chat" sets it from the toolbar.
+    @Binding var attachedTime: Double?
     let segments: [ZoomSegment]
     let onApply: ([ZoomSegment]) -> Void
     /// Open the split preview of one reply's change: its `before` plan
@@ -216,6 +229,12 @@ struct AIPanelView: View {
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
+
+    /// "0:04" — the short timecode the chips show.
+    static func timecode(_ t: Double) -> String {
+        let total = Int(max(0, t).rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -261,7 +280,7 @@ struct AIPanelView: View {
 
     private var intro: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Hand your zoom plan to an agent for an editorial pass: tighter timing, fewer zooms and pans, better framing.")
+            Text("Hand your zoom plan to an agent for an editorial pass: tighter timing, fewer and better zooms, the right levels. It sees annotated stills of the recording, can render previews of its plan through the real camera, and checks it against the app's rules before replying.")
             Text("Describe the polish you want, or just send to use the default brief.")
                 .foregroundStyle(Theme.mutedForeground)
             if chat.providers.isEmpty {
@@ -277,29 +296,89 @@ struct AIPanelView: View {
     // MARK: - Composer (Figma 29:4692)
 
     private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            attachTimestamp
+            composerBox
+        }
+    }
+
+    /// "Attach timestamp: 0:04 | +" (Figma 83:14716): a split pill that pins
+    /// the playhead's moment to the next note. Clicking again re-attaches
+    /// the current playhead.
+    private var attachTimestamp: some View {
+        Button {
+            attachedTime = currentTime
+            composerFocused = true
+        } label: {
+            HStack(spacing: 0) {
+                Text("Attach timestamp: \(Self.timecode(currentTime))")
+                    .font(Theme.font(.label12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.foreground)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                Rectangle().fill(Theme.border).frame(width: 1, height: 26)
+                Icon(name: "plus", size: 16, fallback: "plus")
+                    .foregroundStyle(Theme.foreground)
+                    .frame(width: 26, height: 26)
+            }
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.border))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .disabled(chat.running)
+        .tooltip("Attach the playhead's moment to your note so the agent knows exactly where you mean")
+    }
+
+    private var composerBox: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 24) {
-                TextField(
-                    chat.hasStarted ? "Follow-up note…" : "Describe the polish",
-                    text: $draft, axis: .vertical
-                )
-                .lineLimit(1...5)
-                .textFieldStyle(.plain)
-                .font(Theme.font(.body12))
-                .focused($composerFocused)
-                .disabled(chat.running)
-                .onSubmit(send)
-                Button(action: send) {
-                    if chat.running {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Icon(name: "arrow-return", size: 12, fallback: "return")
+            VStack(alignment: .leading, spacing: 8) {
+                if let attachedTime {
+                    HStack(spacing: 10) {
+                        Text("Timestamp \(Self.timecode(attachedTime))")
+                            .font(Theme.font(.label12))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.foreground)
+                        Button {
+                            self.attachedTime = nil
+                        } label: {
+                            Icon(name: "x", size: 16, fallback: "xmark")
+                                .foregroundStyle(Theme.foreground)
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                        .tooltip("Remove the timestamp")
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Theme.muted, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.secondary))
                 }
-                .buttonStyle(.themed(.primary, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
-                .disabled(!canSend)
-                .keyboardShortcut(.return, modifiers: .command)
-                .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Polish (⌘↩)")
+                HStack(spacing: 16) {
+                    TextField(
+                        attachedTime != nil ? "What changes do you want at this moment?"
+                            : (chat.hasStarted ? "Follow-up note…" : "Describe the polish"),
+                        text: $draft, axis: .vertical
+                    )
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)
+                    .font(Theme.font(.body12))
+                    .focused($composerFocused)
+                    .disabled(chat.running)
+                    .onSubmit(send)
+                    Button(action: send) {
+                        if chat.running {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Icon(name: "arrow-return", size: 12, fallback: "return")
+                        }
+                    }
+                    .buttonStyle(.themed(.primary, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
+                    .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Polish (⌘↩)")
+                }
             }
             .padding(8)
             .frame(minHeight: 44)
@@ -380,9 +459,11 @@ struct AIPanelView: View {
 
     private var canSend: Bool {
         guard chat.provider != nil, meta != nil, !chat.running else { return false }
-        if chat.hasStarted {
-            // Follow-ups need a note; an empty plan is a legitimate state to iterate from.
-            return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasNote = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if chat.hasStarted || attachedTime != nil {
+            // Follow-ups (and any note about a moment) need words; an empty
+            // plan is a legitimate state to iterate from.
+            return hasNote
         }
         // The first turn may be note-less (default brief) but needs a plan to polish.
         return !segments.isEmpty
@@ -391,8 +472,10 @@ struct AIPanelView: View {
     private func send() {
         guard canSend, let meta else { return }
         let note = draft
+        let timestamp = attachedTime
         draft = ""
-        chat.send(note: note, recording: recording, meta: meta, duration: duration,
+        attachedTime = nil
+        chat.send(note: note, timestamp: timestamp, recording: recording, meta: meta, duration: duration,
                   segments: segments, apply: onApply)
     }
 }
@@ -407,7 +490,18 @@ private struct MessageRow: View {
     var body: some View {
         switch message.role {
         case .user:
-            Text(message.text)
+            VStack(alignment: .leading, spacing: 8) {
+                if let timestamp = message.timestamp {
+                    Text("Timestamp \(AIPanelView.timecode(timestamp))")
+                        .font(Theme.font(.label12))
+                        .monospacedDigit()
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.secondary))
+                }
+                Text(message.text)
+            }
                 .font(Theme.font(.label12))
                 .foregroundStyle(Theme.foreground)
                 .padding(12)

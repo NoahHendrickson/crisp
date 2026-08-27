@@ -2,72 +2,31 @@ import SwiftUI
 import AVFoundation
 import AppKit
 
-// The editor's controls row: preview / crop-box tabs, New zoom / New pan,
-// the "Start from" plan source, AI Polish, Compare and Export.
+// The editor's toolbar (Figma 93:1064), above the timeline: preview /
+// crop-box tabs, the zoom level and pin viewport groups that edit the
+// moment under the playhead, an overflow menu, then — behind a hairline —
+// the AI editor, Send timestamp to chat, and Compare. Everything is one
+// 32pt row; an export in progress shows on the right.
 extension EditorView {
-    // MARK: - Plan source ("Start from")
-
-    /// Current plan, each export that carries a plan snapshot, then Auto.
-    var planSourceItems: [DropdownItem] {
-        let exports = recording.files.filter { !$0.isMaster }
-        let checked = checkedPlanSource(exports: exports)
-        var items = [
-            DropdownItem(id: "current", label: "Current plan", checked: checked == .current,
-                         detail: "\(zoomsLabel(segments.count)) · what Export with Zooms will render") {
-                loadPlan(recording.loadPlanSegments() ?? autoSegments(), source: .current)
-            },
-        ]
-        for file in exports.reversed() {
-            guard let snapshot = file.planSnapshotURL,
-                  let plan = Recording.loadPlanSegments(from: snapshot) else { continue }
-            var detail = zoomsLabel(plan.count)
-            if let date = file.modifiedAt {
-                detail += " · \(date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
-            }
-            items.append(DropdownItem(id: file.url.path, label: "\(file.title) (\(file.format))",
-                                      checked: checked.exportURL == file.url, detail: detail) {
-                loadPlan(plan, source: .export(file.url, loaded: plan))
-            })
-        }
-        items.append(DropdownItem(id: "auto", label: "Auto (from clicks)", checked: checked.isAuto,
-                                  detail: "Regenerate zooms from the click log") {
-            try? FileManager.default.removeItem(at: recording.planURL)
-            let auto = autoSegments()
-            loadPlan(auto, source: .auto(loaded: auto))
-        })
-        return items
-    }
-
-    /// The last-picked source keeps its check only while the plan still
-    /// matches what it loaded (and, for an export, while that export still
-    /// exists); otherwise the working plan is simply "Current plan".
-    func checkedPlanSource(exports: [RecordingFile]) -> PlanSource {
-        switch planSource {
-        case .current:
-            return .current
-        case .auto(let loaded):
-            return loaded == segments ? planSource : .current
-        case .export(let url, let loaded):
-            return loaded == segments && exports.contains { $0.url == url } ? planSource : .current
-        }
-    }
+    // MARK: - Plan
 
     /// Swaps the plan in, keeping the previous one as the Compare baseline.
-    func loadPlan(_ plan: [ZoomSegment], source: PlanSource) {
+    func loadPlan(_ plan: [ZoomSegment]) {
         compareBaseline = segments
         compareTarget = nil
         segments = plan
-        planSource = source
-        select(nil)
     }
 
-    func zoomsLabel(_ n: Int) -> String {
-        n == 1 ? "1 zoom" : "\(n) zooms"
+    /// Throw away the edited plan and regenerate the zooms from the click
+    /// log; the edited plan stays available as the Compare baseline.
+    func resetZoomsToDefault() {
+        try? FileManager.default.removeItem(at: recording.planURL)
+        loadPlan(autoSegments())
     }
 
     func planner() -> ZoomPlanner {
         guard let meta else { return ZoomPlanner(width: 1, height: 1) }
-        return ZoomPlanner(width: Double(meta.pixelWidth), height: Double(meta.pixelHeight))
+        return ZoomPlanner(meta: meta)
     }
 
     func autoSegments() -> [ZoomSegment] {
@@ -99,7 +58,7 @@ extension EditorView {
         return CameraCompositor.makeComposition(duration: clipDuration, composer: composer)
     }
 
-    // MARK: - Controls
+    // MARK: - Transport
 
     var isPlaying: Bool {
         player.timeControlStatus == .playing
@@ -114,10 +73,11 @@ extension EditorView {
         }
     }
 
-    /// Row between the preview and the timeline (Figma 76:13710): the
-    /// preview / crop-box tabs, plan actions, then compare and export.
+    // MARK: - Toolbar
+
     var controls: some View {
-        HStack(spacing: 8) {
+        let level = playheadLevel
+        return HStack(spacing: 8) {
             IconTabsPicker(
                 items: Array(ViewMode.allCases),
                 selection: $viewMode,
@@ -125,67 +85,38 @@ extension EditorView {
                 fallback: { $0 == .preview ? "photo" : "viewfinder" },
                 label: { $0 == .preview
                     ? "Preview: play the zooms as they will export"
-                    : "Crop box: edit where each zoom looks on the full frame" }
+                    : "Crop box: see where the camera looks on the full frame; drag a pinned box to move it, its corners to change the level" }
             )
             .disabled(aiChat.running)
-            // Inside a zoom's hold, "New zoom" tightens that zoom from the
-            // playhead on instead of starting an overlapping one.
-            let inHold = holdSegmentIndex
-            Button {
-                if let index = inHold {
-                    addZoomStepAtPlayhead(segIndex: index)
-                } else {
-                    addZoomAtPlayhead()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Icon(name: "magnifying-glass-plus", size: 16, fallback: "plus.magnifyingglass")
-                    Text(inHold == nil ? "New zoom" : "Zoom in further")
-                }
-            }
-            .buttonStyle(.themed(.outline, size: .md, leadingIcon: true))
-            .disabled(aiChat.running)
-            .tooltip(inHold == nil
-                  ? "Add a zoom at the playhead"
-                  : "Zoom in further from the playhead on, staying inside this zoom")
-            Button {
-                if let index = inHold { addPanAtPlayhead(segIndex: index) }
-            } label: {
-                HStack(spacing: 6) {
-                    Icon(name: "arrows-out-cardinal", size: 16, fallback: "arrow.up.and.down.and.arrow.left.and.right")
-                    Text("New pan")
-                }
-            }
-            .buttonStyle(.themed(.outline, size: .md, leadingIcon: true))
-            .disabled(aiChat.running || inHold == nil)
-            .tooltip(inHold == nil
-                  ? "Move the playhead inside a zoom to add a pan there"
-                  : "Glide the camera to a new spot from the playhead on, staying inside this zoom")
-            DropdownButton(
-                id: "editor.planSource", edge: .top, alignment: .leading,
-                style: { _ in .themed(.outline, size: .md, trailingIcon: true) },
-                items: { planSourceItems }
-            ) { _ in
-                HStack(spacing: 6) {
-                    Text("Start from")
-                    Icon(name: "caret-down", size: 16, fallback: "chevron.down")
-                }
-            }
-            .disabled(aiChat.running)
-            .tooltip("Load the zooms from the current plan, an earlier export, or regenerate them from the click log")
+            LevelStepper(level: level.value, range: Self.zoomRange)
+                .disabled(!level.editable || aiChat.running)
+                .tooltip(levelHelp)
+            pinControl
+                .disabled(aiChat.running)
+            moreMenu
+                .disabled(aiChat.running)
+            toolbarDivider
             Button {
                 withAnimation { showAIPanel.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    if aiChat.running {
-                        ProgressView().controlSize(.mini)
-                    }
-                    Text("Polish with AI")
+                    if aiChat.running { ProgressView().controlSize(.mini) }
+                    Text("AI editor")
                 }
             }
-            .buttonStyle(.themed(.primary, size: .md, leadingIcon: aiChat.running))
-            .tooltip("Open the AI Polish panel: hand the plan to Claude Code or Codex for editorial touch-up")
-            Spacer()
+            .buttonStyle(.themed(showAIPanel ? .primary : .outline, size: .md))
+            .tooltip(showAIPanel
+                  ? "Hide the AI editor"
+                  : "Open the AI editor: hand the plan to Claude Code or Codex for an editorial pass")
+            Button {
+                aiAttachedTime = currentTime
+                if !showAIPanel { withAnimation { showAIPanel = true } }
+            } label: {
+                Text("Send timestamp to chat")
+            }
+            .buttonStyle(.themed(.outline, size: .md))
+            .disabled(aiChat.running)
+            .tooltip("Attach the playhead's moment (\(timecodeShort(currentTime))) to your next note so the agent knows exactly where you mean")
             Button {
                 setComparing(!comparing)
             } label: {
@@ -199,35 +130,68 @@ extension EditorView {
             .tooltip(comparing
                   ? "Back to the normal preview"
                   : "Play the edited zooms before and after your changes, stacked top and bottom")
+            Spacer(minLength: 0)
             if let fraction = model.exportProgress[folder] {
-                ExportProgressControls(fraction: fraction, width: 280) {
+                ExportProgressControls(fraction: fraction, width: 200) {
                     model.cancelExport(recording)
                 }
-            } else {
-                ExportSplitButton(title: "Export with Zooms", edge: .top) {
-                    recording.savePlan(segments)
-                    model.export(recording)
-                }
-                .disabled(aiChat.running)
             }
         }
+        .frame(height: ControlSizeToken.md.height)
     }
 
-    func addZoomAtPlayhead() {
-        guard let meta else { return }
-        let start = min(currentTime, max(0, duration - 0.5))
+    /// The overflow menu (⋮): the plan-level actions that don't need a
+    /// button of their own.
+    var moreMenu: some View {
+        DropdownButton(
+            id: "editor.more",
+            style: { _ in .themed(.outline, size: .md, iconOnly: true) },
+            items: { moreItems() }
+        ) { _ in
+            Icon(name: "dots-three-outline-vertical", size: 16, fallback: "ellipsis")
+        }
+        .tooltip("More: add or remove a zoom, reset all, export")
+    }
+
+    func moreItems() -> [DropdownItem] {
+        var items: [DropdownItem] = []
+        if let i = holdIndexAtPlayhead {
+            items.append(DropdownItem(id: "remove", label: "Remove this zoom") {
+                guard segments.indices.contains(i) else { return }
+                segments.remove(at: i)
+            })
+        } else {
+            items.append(DropdownItem(id: "add", label: "Add a zoom here",
+                                      detail: "A 2s zoom at the playhead; the camera follows the cursor") {
+                addZoom(at: currentTime)
+            })
+        }
+        items.append(DropdownItem(id: "reset", label: "Reset all zooms",
+                                  detail: "Regenerate from the click log; Compare keeps your edits") {
+            resetZoomsToDefault()
+        })
+        if model.exportProgress[folder] == nil {
+            items.append(DropdownItem(id: "export", label: "Export with zooms",
+                                      detail: "\(model.exportFormat.rawValue), saved next to the master") {
+                recording.savePlan(segments)
+                model.export(recording)
+            })
+        }
+        return items
+    }
+
+    /// Hairline between toolbar clusters (Figma 93:1066).
+    var toolbarDivider: some View {
+        Rectangle()
+            .fill(Theme.input)
+            .frame(width: 1, height: 24)
+            .padding(.horizontal, 4)
+    }
+
+    /// A 2s zoom whose hold begins at `t`; the follower frames it.
+    func addZoom(at t: Double) {
+        let start = min(t, max(0, duration - 0.5))
         let end = min(start + 2.0, duration)
-        // Center on wherever the cursor was at this moment, if we know.
-        let p = FrameComposer.cursorPosition(samples: meta.samples, at: start)
-        let config = ZoomPlanner.Config()
-        let segment = ZoomSegment(
-            start: start,
-            end: end,
-            zoom: config.zoomLevel,
-            cx: p?.x ?? Double(meta.pixelWidth) / 2,
-            cy: p?.y ?? Double(meta.pixelHeight) / 2
-        )
-        segments.append(segment)
-        select(.segment(segment.id))
+        segments.append(ZoomSegment(start: start, end: end, zoom: ZoomPlanner.Config().zoomLevel))
     }
 }

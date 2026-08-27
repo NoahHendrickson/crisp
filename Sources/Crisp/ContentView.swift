@@ -159,7 +159,7 @@ struct ContentView: View {
             ButtonGroupSeparator(height: 32)
 
             DropdownButton(
-                id: "screenshot.format", alignment: .trailing,
+                id: "screenshot.format", edge: .top, alignment: .trailing,
                 style: { _ in .themed(.outline, size: .lg, iconOnly: true, corners: .trailing(Theme.radiusSm)) },
                 items: {
                     ScreenshotFormat.allCases.map { format in
@@ -470,7 +470,7 @@ struct ContentView: View {
                     .foregroundStyle(Theme.mutedForeground)
                 Text("Screen Recording permission needed")
                     .font(Theme.font(.label14))
-                Text("Toggle Crisp on in System Settings. Crisp re-checks automatically every 20 seconds — or hit Check Again. If macOS asks to quit and reopen the app, that's fine: an in-flight recording is finalized safely first.")
+                Text("Toggle Crisp on in System Settings, then hit Check Again. If macOS asks to quit and reopen the app, that's fine: an in-flight recording is finalized safely first.")
                     .font(Theme.font(.body12))
                     .foregroundStyle(Theme.mutedForeground)
                     .multilineTextAlignment(.center)
@@ -715,15 +715,15 @@ private func countLabel(_ n: Int, _ noun: String) -> String {
 /// Brand-green zoom / pan counts (Figma 75:11919).
 private struct ZoomPanTag: View {
     let zoomCount: Int
-    let panCount: Int
+    let stepCount: Int
 
     var body: some View {
         HStack(spacing: 10) {
             if zoomCount > 0 {
                 Text(countLabel(zoomCount, "Zoom"))
             }
-            if panCount > 0 {
-                Text(countLabel(panCount, "Pan"))
+            if stepCount > 0 {
+                Text(countLabel(stepCount, "Step"))
             }
         }
         .padding(.horizontal, 4)
@@ -775,8 +775,8 @@ private struct RecordingRow: View {
                 Text(fileInfo)
                     .foregroundStyle(Theme.mutedForeground)
                     .lineLimit(1)
-                if summary.zoomCount > 0 || summary.panCount > 0 {
-                    ZoomPanTag(zoomCount: summary.zoomCount, panCount: summary.panCount)
+                if summary.zoomCount > 0 || summary.stepCount > 0 {
+                    ZoomPanTag(zoomCount: summary.zoomCount, stepCount: summary.stepCount)
                         .fixedSize()
                 }
             }

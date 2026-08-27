@@ -70,48 +70,79 @@ struct RaisedChrome<S: InsettableShape>: View {
 // MARK: - Pointer cursor
 
 /// Shows the pointing-hand cursor over a clickable control. Disabled views
-/// keep the arrow. Uses AppKit cursor rects so the cursor resets when the
-/// mouse leaves, even if SwiftUI hover gets out of sync.
+/// keep the arrow.
+///
+/// Driven by SwiftUI hover rather than AppKit cursor rects: a cursor-rect
+/// view under SwiftUI content never receives cursor-update events (the
+/// hosting view hit-tests everything itself), so rects silently do nothing.
+/// Every hovered control registers with `PointerCursor`, which sets the
+/// hand while any control is hovered and puts the arrow back when none is
+/// — so nested clickables, controls that vanish mid-hover and disabled
+/// states can't strand the cursor. The hand is re-asserted on each mouse
+/// move because the hosting view resets to the arrow on its own.
 extension View {
     func pointingHandCursor() -> some View {
         modifier(PointingHandCursorModifier())
     }
 }
 
+/// The set of controls currently under the pointer.
+@MainActor
+enum PointerCursor {
+    private static var hovered = Set<UUID>()
+
+    static func enter(_ id: UUID) {
+        hovered.insert(id)
+        if NSCursor.current != NSCursor.pointingHand { NSCursor.pointingHand.set() }
+    }
+
+    static func reassert(_ id: UUID) {
+        guard hovered.contains(id), NSCursor.current != NSCursor.pointingHand else { return }
+        NSCursor.pointingHand.set()
+    }
+
+    static func exit(_ id: UUID) {
+        guard hovered.remove(id) != nil, hovered.isEmpty else { return }
+        NSCursor.arrow.set()
+    }
+}
+
 private struct PointingHandCursorModifier: ViewModifier {
     @Environment(\.isEnabled) private var isEnabled
+    @State private var id = UUID()
+    @State private var inside = false
 
     func body(content: Content) -> some View {
-        content.background {
-            if isEnabled { PointingHandCursorView() }
-        }
+        content
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    guard isEnabled else { return }
+                    if inside {
+                        PointerCursor.reassert(id)
+                    } else {
+                        inside = true
+                        PointerCursor.enter(id)
+                    }
+                case .ended:
+                    guard inside else { return }
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
+            .onChange(of: isEnabled) { _, enabled in
+                if !enabled, inside {
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
+            .onDisappear {
+                if inside {
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
     }
-}
-
-private struct PointingHandCursorView: NSViewRepresentable {
-    func makeNSView(context: Context) -> PointingHandCursorNSView {
-        PointingHandCursorNSView()
-    }
-
-    func updateNSView(_ view: PointingHandCursorNSView, context: Context) {}
-}
-
-private final class PointingHandCursorNSView: NSView {
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Buttons (button.tsx variants + sizes)
@@ -559,26 +590,3 @@ struct ExportProgressControls: View {
     }
 }
 
-// MARK: - Hatch
-
-/// Diagonal stripes used on the timeline to mark automatic (non-editable)
-/// camera phases. Draws over the view's frame; clip to shape as needed.
-struct Hatch: View {
-    var color: Color
-    var spacing: CGFloat = 7
-    var lineWidth: CGFloat = 2
-
-    var body: some View {
-        Canvas { ctx, size in
-            var path = Path()
-            let span = size.width + size.height
-            var offset: CGFloat = -size.height
-            while offset < span {
-                path.move(to: CGPoint(x: offset, y: size.height))
-                path.addLine(to: CGPoint(x: offset + size.height, y: 0))
-                offset += spacing
-            }
-            ctx.stroke(path, with: .color(color), lineWidth: lineWidth)
-        }
-    }
-}

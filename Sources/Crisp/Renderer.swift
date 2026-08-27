@@ -45,7 +45,7 @@ final class Renderer {
         let fps = 60.0
 
         // Use the hand-edited plan when one exists; otherwise auto-generate.
-        let planner = ZoomPlanner(width: Double(width), height: Double(height))
+        let planner = ZoomPlanner(meta: meta)
         let segments = recording.loadPlanSegments()
             ?? planner.segments(events: meta.events, duration: duration)
         let keys = planner.keyframes(from: segments, duration: duration)

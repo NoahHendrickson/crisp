@@ -42,35 +42,37 @@ private struct PlayerLayerView: NSViewRepresentable {
 }
 
 /// Post-recording zoom editor: video preview with zooms applied live, a
-/// timeline of zoom segments, and per-segment controls. Edits autosave to
-/// plan.json, which "Export with Zooms" then uses instead of the auto plan.
+/// toolbar that edits the zoom level and framing at the playhead, and a
+/// three-row timeline (video, zooms, framing). Edits autosave to plan.json,
+/// which "Export with zooms" then uses instead of the auto plan.
 struct EditorView: View {
     let folder: URL
 
     @EnvironmentObject var model: AppModel
     @State var meta: RecordingMeta?
     @State var duration: Double = 1
-    enum Selection: Equatable {
-        case segment(UUID)
-        case pan(segment: UUID, pan: UUID)
-    }
 
     @State var segments: [ZoomSegment] = []
-    @State var selection: Selection?
-    /// The hold edge being dragged on the timeline, with the time it had when
-    /// the drag began so the edge tracks the pointer instead of jumping to it.
-    struct EdgeDrag: Equatable {
-        let id: UUID
-        let edge: HorizontalEdge
+    /// A keyframe being dragged along the timeline, with the time it had
+    /// when the drag began so it tracks the pointer instead of jumping to it.
+    struct TimelineDrag: Equatable {
+        enum Target: Equatable {
+            case zoomStart(UUID), zoomEnd(UUID)
+            case pinStart(segment: UUID, pin: UUID), pinEnd(segment: UUID, pin: UUID)
+        }
+        let target: Target
         let origin: Double
     }
-    @State var edgeDrag: EdgeDrag?
+    @State var timelineDrag: TimelineDrag?
+    /// The plan's baked camera (levels + follower framing), refreshed when the
+    /// plan changes so the crop box doesn't re-run the follower per render.
+    @State var cameraKeys: [ZoomPlanner.Keyframe] = []
     @State var player = AVPlayer()
     @State var currentTime: Double = 0
     @State var timeObserver: Any?
     @State var loadError: String?
     @State var rebuildTask: Task<Void, Never>?
-    /// What the preview shows (the IconTabList above the timeline): the real
+    /// What the preview shows (the IconTabList on the toolbar): the real
     /// zoomed camera, or the full frame with an editable crop box.
     enum ViewMode: String, CaseIterable, Identifiable {
         case preview, box
@@ -86,34 +88,18 @@ struct EditorView: View {
     /// True while the preview shows baseline (top) and current (bottom)
     /// stacked, looping over the zooms that differ.
     @State var comparing = false
-    /// Where the working plan was last loaded from, with the plan it loaded.
-    /// The "Start from" check mark stays on a source only while `segments`
-    /// still equals that plan; any edit makes it simply "Current plan".
-    enum PlanSource: Equatable {
-        case current
-        case auto(loaded: [ZoomSegment])
-        case export(URL, loaded: [ZoomSegment])
-
-        var isAuto: Bool {
-            if case .auto = self { return true } else { return false }
-        }
-        var exportURL: URL? {
-            if case .export(let url, _) = self { return url } else { return nil }
-        }
-    }
-    @State var planSource: PlanSource = .current
-
     @StateObject var aiChat = AIChat()
     @State var showAIPanel = false
+    /// The moment "Send timestamp to chat" attached to the AI panel's next note.
+    @State var aiAttachedTime: Double?
     @State private var windowHandle = EditorWindowHandle()
     /// How far the window is currently grown below its natural height for
-    /// the inspector and/or the compare view (see `syncWindowGrowth`).
+    /// the compare view (see `syncWindowGrowth`).
     @State var windowGrown: CGFloat = 0
 
     var recording: Recording { Recording(folder: folder) }
-    let baseMinWidth: CGFloat = 880
-    /// Room for the zoom/pan GroupBox plus the VStack gap above it.
-    static let inspectorExpansion: CGFloat = 260
+    /// Wide enough for the toolbar with an export running.
+    let baseMinWidth: CGFloat = 1000
     /// Extra height so each half of the stacked compare view stays usable.
     static let compareExpansion: CGFloat = 220
 
@@ -133,13 +119,11 @@ struct EditorView: View {
                             .overlay { frameOverlay.disabled(aiChat.running) }
                             .overlay { if comparing { compareLabels } }
                             .clipShape(RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous))
-                        VStack(alignment: .leading, spacing: 32) {
-                            // Plan edits are locked while a turn is in flight so the
-                            // agent's reply can't clobber them.
-                            timeline
+                        // Plan edits are locked while a turn is in flight so the
+                        // agent's reply can't clobber them (each control checks).
+                        VStack(alignment: .leading, spacing: 16) {
                             controls
-                            inspector
-                                .disabled(aiChat.running)
+                            timeline
                         }
                     }
                     .padding(24)
@@ -149,6 +133,8 @@ struct EditorView: View {
                             recording: recording,
                             meta: meta,
                             duration: duration,
+                            currentTime: currentTime,
+                            attachedTime: $aiAttachedTime,
                             segments: segments,
                             onApply: { plan in
                                 // A historical Compare must not outlive the plan it
@@ -157,7 +143,6 @@ struct EditorView: View {
                                 compareTarget = nil
                                 compareBaseline = segments
                                 segments = plan
-                                select(nil)
                             },
                             onCompare: { before, after in
                                 compareBaseline = before
@@ -173,7 +158,7 @@ struct EditorView: View {
         .font(Theme.font(.body12))
         .foregroundStyle(Theme.foreground)
         .groupBoxStyle(.card)
-        .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 660)
+        .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 688)
         .background(Theme.background)
         .background(WindowChrome())
         .background(EditorWindowHandleView(handle: windowHandle))
@@ -193,10 +178,8 @@ struct EditorView: View {
         }
         .onChange(of: segments) { _, _ in
             if comparing && planDiff == nil { setComparing(false) }
+            cameraKeys = planner().keyframes(from: segments, duration: duration)
             scheduleRebuild()
-        }
-        .onChange(of: selection) { _, _ in
-            player.currentItem?.videoComposition = makeComposition()
         }
         .onChange(of: viewMode) { _, _ in
             if comparing { setComparing(false) }
@@ -228,6 +211,7 @@ struct EditorView: View {
                 let asset = AVURLAsset(url: recording.masterURL)
                 duration = try await asset.load(.duration).seconds
                 segments = recording.loadPlanSegments() ?? autoSegments()
+                cameraKeys = planner().keyframes(from: segments, duration: duration)
                 compareBaseline = segments
                 let item = AVPlayerItem(asset: asset)
                 item.videoComposition = makeComposition()
@@ -257,25 +241,21 @@ struct EditorView: View {
         return diff.isEmpty ? nil : diff
     }
 
-    /// The window is grown below its natural height while the inspector
-    /// and/or the compare view are showing, so the preview and timeline stay
-    /// put. The target height is derived from state; only the delta since
-    /// the last sync is applied.
+    /// The window is grown below its natural height while the compare view
+    /// is showing, so the preview and timeline stay put. The target height
+    /// is derived from state; only the delta since the last sync is applied.
     func syncWindowGrowth() {
-        let wanted = (selection != nil ? Self.inspectorExpansion : 0)
-            + (comparing ? Self.compareExpansion : 0)
+        let wanted: CGFloat = comparing ? Self.compareExpansion : 0
         windowHandle.growDown(by: wanted - windowGrown)
         windowGrown = wanted
     }
 
-    /// Enter/leave the stacked before/after preview. Entering clears any
-    /// selection (the crop box has no meaning across two plans), grows the
+    /// Enter/leave the stacked before/after preview. Entering grows the
     /// window so each half keeps a usable size, and starts playing from the
     /// first edited window.
     func setComparing(_ on: Bool) {
         guard on != comparing else { return }
         if on {
-            select(nil)
             comparing = true
             syncWindowGrowth()
             player.currentItem?.videoComposition = makeComposition()
@@ -352,8 +332,8 @@ struct EditorView: View {
 
     static let zoomRange: ClosedRange<Double> = 1.2...3.0
 
-    /// Editable crop box, shown in the box view for the selected zoom or pan
-    /// — or, with nothing selected, for the zoom under the playhead.
+    /// Crop box over the full frame in the box view: where the camera is at
+    /// the playhead, editable inside a zoom's hold.
     @ViewBuilder
     var frameOverlay: some View {
         if let meta, viewMode == .box, !comparing, let target = boxTarget {
@@ -361,8 +341,8 @@ struct EditorView: View {
                 pixelWidth: Double(meta.pixelWidth),
                 pixelHeight: Double(meta.pixelHeight),
                 zoomRange: Self.zoomRange,
-                zoomEditable: target.editable,
-                editable: target.editable,
+                zoomEditable: target.zoomEditable,
+                editable: target.movable,
                 cx: target.cx,
                 cy: target.cy,
                 zoom: target.zoom
@@ -375,98 +355,100 @@ struct EditorView: View {
         var cx: Binding<Double>
         var cy: Binding<Double>
         var zoom: Binding<Double>
-        var editable: Bool
+        /// The corners set the level: the playhead is parked on a level
+        /// keyframe (the zoom's own, or a step once it has eased in).
+        var zoomEditable: Bool
+        /// Dragging the box moves a pin: the playhead is inside one. While
+        /// the camera follows the cursor the box only mirrors it.
+        var movable: Bool
     }
 
-    /// Resolve the crop box from the playhead and selection. Outside the
-    /// zoom's hold it only mirrors where the camera really is (full frame, or
-    /// the in-between framing mid-ramp). Inside, it edits the selected pan,
-    /// else the latest pan that has started, else the zoom's own framing;
-    /// resizing the box at a pan gives that move its own zoom level.
+    /// Resolve the crop box from the playhead. Mid-ramp and mid-step it is
+    /// view-only; inside the hold its corners edit the level in effect and,
+    /// while a pin applies, dragging it places that pin.
     var boxTarget: BoxTarget? {
         guard let index = boxSegmentIndex else { return nil }
         let seg = segments[index]
         let span = motionSpan(for: seg)
-        if currentTime < span.arrive || currentTime > span.end {
-            let camera = ZoomPlanner.evaluate(
-                planner().keyframes(from: segments, duration: duration),
-                at: currentTime
-            )
-            return BoxTarget(
-                cx: .constant(camera.center.x), cy: .constant(camera.center.y),
-                zoom: .constant(camera.zoom), editable: false
-            )
+        let camera = camera(at: currentTime)
+        var cx = Binding<Double>.constant(camera.center.x)
+        var cy = Binding<Double>.constant(camera.center.y)
+        guard currentTime >= span.arrive - Self.keyframeSlop, currentTime <= span.end + Self.keyframeSlop,
+              !isMidStep(in: seg) else {
+            return BoxTarget(cx: cx, cy: cy, zoom: .constant(camera.zoom), zoomEditable: false, movable: false)
         }
-        var panIndex = activePanIndex(in: seg)
-        if case .pan(_, let panID) = selection,
-           let selected = seg.pans.firstIndex(where: { $0.id == panID }) {
-            panIndex = selected
-        }
-        if let panIndex {
-            return BoxTarget(
-                cx: $segments[index].pans[panIndex].cx,
-                cy: $segments[index].pans[panIndex].cy,
-                zoom: panZoomBinding(segIndex: index, panIndex: panIndex),
-                editable: true
+        var movable = false
+        if let pinID = pinIDAtPlayhead(in: seg) {
+            movable = true
+            cx = Binding(
+                get: { pin(pinID, in: index)?.x ?? camera.center.x },
+                set: { v in updatePin(pinID, in: index) { $0.x = v } }
+            )
+            cy = Binding(
+                get: { pin(pinID, in: index)?.y ?? camera.center.y },
+                set: { v in updatePin(pinID, in: index) { $0.y = v } }
             )
         }
-        return BoxTarget(
-            cx: $segments[index].cx, cy: $segments[index].cy,
-            zoom: $segments[index].zoom, editable: true
-        )
+        if let stepIndex = activeStepIndex(in: seg) {
+            return BoxTarget(cx: cx, cy: cy, zoom: $segments[index].steps[stepIndex].zoom, zoomEditable: true, movable: movable)
+        }
+        return BoxTarget(cx: cx, cy: cy, zoom: $segments[index].zoom, zoomEditable: true, movable: movable)
     }
 
-    /// The zoom whose crop box the box view shows: the selection, or else
-    /// whichever zoom's motion window contains the playhead.
+    /// The zoom whose motion window (ramps included) contains the playhead.
     var boxSegmentIndex: Int? {
-        if let index = selectedSegmentIndex { return index }
-        return segments.firstIndex {
+        segments.firstIndex {
             let span = motionSpan(for: $0)
             return currentTime >= span.moveStart && currentTime <= span.outEnd
         }
     }
 
-    /// The zoom level in effect once `pan` has completed: its own, or the
-    /// latest earlier step's, or the zoom's base level.
-    func zoomLevel(in seg: ZoomSegment, after pan: PanMove) -> Double {
-        seg.pans
-            .filter { $0.t <= pan.t && $0.zoom != nil }
-            .max { $0.t < $1.t }?.zoom ?? seg.zoom
+    func pin(_ pinID: UUID, in index: Int) -> PinWindow? {
+        guard segments.indices.contains(index) else { return nil }
+        return segments[index].pins.first { $0.id == pinID }
     }
 
-    /// The zoom level the camera has at `t` inside `seg`'s hold.
-    func zoomLevel(in seg: ZoomSegment, at t: Double) -> Double {
-        seg.pans
-            .filter { $0.t <= t && $0.zoom != nil }
-            .max { $0.t < $1.t }?.zoom ?? seg.zoom
+    func updatePin(_ pinID: UUID, in index: Int, _ edit: (inout PinWindow) -> Void) {
+        guard segments.indices.contains(index),
+              let p = segments[index].pins.firstIndex(where: { $0.id == pinID }) else { return }
+        edit(&segments[index].pins[p])
     }
 
-    /// Read the level a pan lands on; write it as that pan's own level.
-    func panZoomBinding(segIndex: Int, panIndex: Int) -> Binding<Double> {
-        Binding(
-            get: {
-                guard segments.indices.contains(segIndex),
-                      segments[segIndex].pans.indices.contains(panIndex) else { return 1 }
-                let seg = segments[segIndex]
-                return zoomLevel(in: seg, after: seg.pans[panIndex])
-            },
-            set: { segments[segIndex].pans[panIndex].zoom = $0 }
-        )
+    /// Where the camera really is at `t` under the current plan.
+    func camera(at t: Double) -> Camera {
+        let keys = cameraKeys.isEmpty ? planner().keyframes(from: segments, duration: duration) : cameraKeys
+        return ZoomPlanner.evaluate(keys, at: t)
     }
 
-    /// The zoom whose hold window (start…end) contains the playhead: where
-    /// "New pan" and an in-place "New zoom" go.
-    var holdSegmentIndex: Int? {
-        segments.firstIndex { currentTime >= $0.start && currentTime <= $0.end }
+    /// When a step begins easing and when it has reached its level.
+    func stepWindow(_ step: ZoomStep, in seg: ZoomSegment) -> (start: Double, end: Double) {
+        planner().stepWindow(step, in: seg, duration: duration)
     }
 
-    /// Index of the pan whose target the camera shows at the playhead, if any.
-    func activePanIndex(in seg: ZoomSegment) -> Int? {
-        let span = motionSpan(for: seg)
-        guard currentTime >= span.arrive, currentTime <= span.end else { return nil }
-        return seg.pans.indices
-            .filter { seg.pans[$0].t <= currentTime }
-            .max { seg.pans[$0].t < seg.pans[$1].t }
+    /// When each of a zoom's pins applies, in time order.
+    func pinWindows(for seg: ZoomSegment) -> [(id: UUID, from: Double, until: Double)] {
+        planner().pinWindows(for: seg, duration: duration)
+    }
+
+    /// Slack around a keyframe's time, so a playhead parked on one still
+    /// counts as being on it after the player reports back.
+    static let keyframeSlop = 0.03
+
+    /// True while the playhead is strictly inside one of `seg`'s step eases.
+    func isMidStep(in seg: ZoomSegment) -> Bool {
+        seg.steps.contains { step in
+            let window = stepWindow(step, in: seg)
+            return currentTime > window.start + Self.keyframeSlop
+                && currentTime < window.end - Self.keyframeSlop
+        }
+    }
+
+    /// Index of the latest step whose level the camera has reached by the
+    /// playhead, if any.
+    func activeStepIndex(in seg: ZoomSegment) -> Int? {
+        seg.steps.indices
+            .filter { stepWindow(seg.steps[$0], in: seg).end <= currentTime + Self.keyframeSlop }
+            .max { seg.steps[$0].t < seg.steps[$1].t }
     }
 
     // MARK: - Helpers

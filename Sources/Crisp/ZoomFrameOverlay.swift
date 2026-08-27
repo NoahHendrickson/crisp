@@ -62,7 +62,7 @@ struct ZoomFrameOverlay: View {
                         .gesture(moveGesture(scale: scale))
                 }
 
-                if editable && zoomEditable {
+                if zoomEditable {
                     ForEach(Corner.allCases, id: \.self) { corner in
                         Circle()
                             .fill(Color.white)

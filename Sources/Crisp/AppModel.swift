@@ -116,6 +116,11 @@ final class AppModel: ObservableObject {
     private var currentSource: CaptureSource?
     private var startedAt: Date?
     private var previewTask: Task<Void, Never>?
+    private var accessCheckTask: Task<Void, Never>?
+    private var activationObserver: (any NSObjectProtocol)?
+    /// After preflight says yes but ScreenCaptureKit still denies, the grant
+    /// needs a relaunch. Don't keep probing — that re-shows the system sheet.
+    private var awaitingRelaunch = false
 
     var isRecording: Bool {
         if case .recording = state { return true }
@@ -134,20 +139,18 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         recordings = Recording.loadAll()
-        Task {
-            await probeAccess(attempts: 1)
-            if !hasScreenAccess {
-                // SCShareableContent does NOT auto-prompt on modern macOS — it
-                // silently records a deny. This is the call that actually shows
-                // the system permission dialog (no-op if a decision exists).
-                Self.log("requesting access via CGRequestScreenCaptureAccess")
-                let granted = CGRequestScreenCaptureAccess()
-                Self.log("CGRequestScreenCaptureAccess returned \(granted)")
-                if granted {
-                    await probeAccess(attempts: 2)
-                }
+        observeActivation()
+        // onAppear can fire more than once; never stack probes — each
+        // ScreenCaptureKit / CGRequestScreenCaptureAccess call can show the
+        // system sheet again on macOS 15+ (Deny is not a stored TCC decision).
+        if accessCheckTask == nil {
+            accessCheckTask = Task {
+                // One ScreenCaptureKit probe to learn whether this binary is
+                // allowed. Do not follow a deny with CGRequestScreenCaptureAccess:
+                // on macOS 15+ that re-shows the sheet, and Deny is not sticky.
+                await probeAccess(attempts: 1)
+                startPreviewLoop()
             }
-            startPreviewLoop()
         }
     }
 
@@ -156,15 +159,20 @@ final class AppModel: ObservableObject {
         Self.log("manual grant request")
         let granted = CGRequestScreenCaptureAccess()
         Self.log("CGRequestScreenCaptureAccess returned \(granted)")
-        checkAccessAgain()
+        // If the user denied, probing ScreenCaptureKit would immediately
+        // re-present the same sheet. Wait for Check Again / returning from Settings.
+        if granted {
+            checkAccessAgain()
+        }
     }
 
     @Published var lastProbeError: String?
 
-    /// Ask ScreenCaptureKit directly whether we're authorized. This is the only
-    /// reliable check. For an unauthorized process, macOS shows the permission
-    /// dialog at most once; after TCC has a stored decision, calls fail silently.
-    /// Retries cover transient failures right after launch.
+    /// Ask ScreenCaptureKit whether we're authorized.
+    ///
+    /// On macOS 15+, this is not silent when unauthorized: each call can show
+    /// the Screen Recording sheet (Open System Settings / Deny). Deny does not
+    /// stick, so callers must not loop this.
     func probeAccess(attempts: Int = 3) async {
         for attempt in 1...max(1, attempts) {
             do {
@@ -190,7 +198,10 @@ final class AppModel: ObservableObject {
 
     func checkAccessAgain() {
         Task {
-            await probeAccess()
+            // Retries are only useful after a grant (preflight true). Repeating
+            // ScreenCaptureKit while unauthorized re-shows the system sheet.
+            let attempts = CGPreflightScreenCaptureAccess() ? 3 : 1
+            await probeAccess(attempts: attempts)
             if hasScreenAccess {
                 await refreshShareableContent()
             }
@@ -200,8 +211,8 @@ final class AppModel: ObservableObject {
     /// Refresh shareable content and thumbnails every couple of seconds while idle,
     /// so the source pickers act as (near-)live previews.
     ///
-    /// IMPORTANT: ticks are gated on `hasScreenAccess` — calling ScreenCaptureKit
-    /// on a loop while unauthorized would spam the system permission dialog.
+    /// Ticks are gated on `hasScreenAccess`. When unauthorized, only
+    /// `CGPreflightScreenCaptureAccess` is used — it does not prompt.
     private func startPreviewLoop() {
         guard previewTask == nil else { return }
         previewTask = Task { [weak self] in
@@ -211,15 +222,42 @@ final class AppModel: ObservableObject {
                     if self.hasScreenAccess {
                         await self.refreshShareableContent()
                     } else if tick % 10 == 0 {
-                        // Auto-recover every ~20s: once TCC has a stored decision
-                        // this is silent (no dialog), and it picks up a grant made
-                        // in System Settings without requiring Check Again.
-                        await self.probeAccess(attempts: 1)
+                        await self.recoverAccessIfGranted()
                     }
                 }
                 tick += 1
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
+        }
+    }
+
+    private func observeActivation() {
+        guard activationObserver == nil else { return }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.recoverAccessIfGranted()
+            }
+        }
+    }
+
+    /// Pick up a Screen Recording grant made in System Settings without
+    /// prompting. `CGPreflightScreenCaptureAccess` never shows a dialog;
+    /// ScreenCaptureKit is only called after preflight says we're allowed.
+    private func recoverAccessIfGranted() async {
+        guard accessChecked, !hasScreenAccess, !awaitingRelaunch else { return }
+        guard CGPreflightScreenCaptureAccess() else { return }
+        Self.log("preflight granted — probing ScreenCaptureKit")
+        await probeAccess(attempts: 1)
+        if hasScreenAccess {
+            await refreshShareableContent()
+        } else {
+            awaitingRelaunch = true
+            Self.log("preflight true but probe failed — waiting for relaunch")
         }
     }
 
@@ -269,7 +307,7 @@ final class AppModel: ObservableObject {
             let ns = error as NSError
             consecutiveRefreshFailures += 1
             Self.log("content refresh failed (\(consecutiveRefreshFailures)x): \(ns.domain) \(ns.code) — \(ns.localizedDescription)")
-            if consecutiveRefreshFailures >= 3 {
+            if consecutiveRefreshFailures >= 3 && !CGPreflightScreenCaptureAccess() {
                 hasScreenAccess = false
                 lastProbeError = "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
             }

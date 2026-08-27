@@ -8,6 +8,11 @@ enum Main {
             SelfTest.runBlocking()
             return
         }
+        // Headless helper the AI Polish agent runs from its workspace (see AgentTools).
+        if CommandLine.arguments.contains("--agent-tool") {
+            AgentTools.runBlocking(CommandLine.arguments)
+            return
+        }
         CrispApp.main()
     }
 }
