@@ -14,8 +14,9 @@ extension EditorView {
 
     static let rowHeight: CGFloat = 20
     static let rowGap: CGFloat = 8
-    /// Row icon plus the gap before each track.
-    static let rowInset: CGFloat = 32
+    /// Gutter before the tracks (icon column + gap). 44pt so the ruler's
+    /// "0:00" at label12 — this minus the 8pt tick gap — isn't truncated.
+    static let rowInset: CGFloat = 44
     static let rulerHeight: CGFloat = 16
     static var rowsHeight: CGFloat { rowHeight * 3 + rowGap * 2 }
     static let barCorner: CGFloat = 8
@@ -107,13 +108,14 @@ extension EditorView {
         }
     }
 
-    /// "0:00", a tick every 5pt, and the length at the far end.
+    /// Playhead time, a tick every 5pt, and the length at the far end.
     var ruler: some View {
         HStack(spacing: 8) {
-            Text("0:00")
+            Text(shortTimecode(currentTime))
                 .font(Theme.font(.label12))
                 .monospacedDigit()
                 .foregroundStyle(Theme.foreground)
+                .fixedSize()
                 .frame(width: Self.rowInset - 8, alignment: .leading)
             Canvas { context, size in
                 var x: CGFloat = 0.5
@@ -139,6 +141,7 @@ extension EditorView {
         HStack(spacing: 16) {
             Icon(name: icon, size: 16, fallback: fallback)
                 .foregroundStyle(Theme.foreground)
+                .frame(width: Self.rowInset - 16, alignment: .leading)
                 .tooltip(help)
             track()
         }

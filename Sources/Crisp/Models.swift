@@ -200,8 +200,8 @@ extension ZoomSegment {
 enum CursorStyle: String, Codable, CaseIterable, Identifiable {
     /// The macOS arrow, hand and I-beam, redrawn as flat vectors.
     case classic
-    /// Chunky rounded shapes with a glossy body and soft shadow, drawn a
-    /// little bigger.
+    /// Classic shapes with a white face and a black bevel, drawn a little
+    /// bigger.
     case bubbly
 
     var id: String { rawValue }
@@ -216,7 +216,7 @@ enum CursorStyle: String, Codable, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .classic: return "The macOS pointer, redrawn sharp at any zoom"
-        case .bubbly: return "Rounded, glossy and a little bigger"
+        case .bubbly: return "White face with a black bevel"
         }
     }
 }

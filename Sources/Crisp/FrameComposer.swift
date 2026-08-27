@@ -99,7 +99,7 @@ private final class CursorSprite {
 
     private let sprites: [CursorKind: Sprite]
     private let scaleFactor: Double
-    /// Points-to-points size multiplier of the style (the bubbly set is drawn bigger).
+    /// Points-to-points size multiplier of the style.
     private let styleScale: Double
     /// Rasterization factor: drawn once at 8x, downscaled per frame.
     private static let raster = 8.0
@@ -113,8 +113,8 @@ private final class CursorSprite {
             styleScale = 1
             sprites = Self.classicSprites()
         case .bubbly:
-            styleScale = 1.35
-            sprites = Self.bubblySprites()
+            styleScale = 1
+            sprites = Self.bevelSprites()
         }
     }
 
@@ -210,170 +210,184 @@ private final class CursorSprite {
         ctx.fillPath()
     }
 
-    // MARK: - Bubbly: rounded body, gradient, gloss, soft shadow
+    // MARK: - Bevel: bundled cute arrow, matching hand and I-beam
 
-    /// Each shape sits inside a padded box so its rim and shadow never clip;
-    /// hot spots are the shape's own plus the padding.
-    private static func bubblySprites() -> [CursorKind: Sprite] {
+    /// Black outline around the white face; also the stroke used for the
+    /// extruded side so the rim and the 3D depth read as one mass.
+    private static let bevelOutline: CGFloat = 2.4
+    /// Down-right in the sprite's top-left space, matching cute-arrow.svg.
+    private static let bevelExtrude = CGPoint(x: 2.0, y: 2.6)
+
+    /// Each shape sits inside a padded box so its rim, extrusion and shadow
+    /// never clip; hot spots are the shape's own plus the padding.
+    private static func bevelSprites() -> [CursorKind: Sprite] {
         var built: [CursorKind: Sprite] = [:]
-        let arrowBox = CGSize(width: 20, height: 26)
+        let arrowBox = CGSize(width: 28, height: 30)
         if let image = rasterize(width: arrowBox.width, height: arrowBox.height, draw: { ctx in
-            bubbly(bubblyArrowPath(), in: ctx, box: arrowBox, pad: CGPoint(x: 2.8, y: 2.8),
-                   gloss: CGRect(x: 0, y: 0, width: 14, height: 9))
+            drawCuteArrow(in: ctx)
         }) {
-            built[.arrow] = Sprite(image: image, hotSpot: CGPoint(x: 2.8, y: 2.8), pointSize: arrowBox)
+            // Tip of the artwork is about (4.25, 0).
+            built[.arrow] = Sprite(
+                image: image,
+                hotSpot: CGPoint(x: 4.25, y: 0.4),
+                pointSize: arrowBox
+            )
         }
-        let handBox = CGSize(width: 32, height: 36)
+        let handPad = CGPoint(x: 4, y: 4)
+        let handBox = CGSize(width: 36, height: 44)
         if let image = rasterize(width: handBox.width, height: handBox.height, draw: { ctx in
-            bubbly(bubblyPointerPath(), in: ctx, box: handBox, pad: CGPoint(x: 1.5, y: 1.5),
-                   gloss: CGRect(x: 0, y: 3, width: 28, height: 13),
-                   creases: [
-                       (CGPoint(x: 15.9, y: 13.5), CGPoint(x: 15.9, y: 19.0)),
-                       (CGPoint(x: 20.1, y: 15.5), CGPoint(x: 20.1, y: 20.5)),
-                       (CGPoint(x: 23.9, y: 18.0), CGPoint(x: 23.9, y: 22.0)),
-                   ])
+            bevel(classicPointerPath(), in: ctx, pad: handPad)
         }) {
-            // Fingertip is the path's (13, 3).
-            built[.pointer] = Sprite(image: image, hotSpot: CGPoint(x: 14.5, y: 4.5), pointSize: handBox)
+            built[.pointer] = Sprite(
+                image: image,
+                hotSpot: CGPoint(x: 13 + handPad.x, y: 8 + handPad.y),
+                pointSize: handBox
+            )
         }
-        let beamBox = CGSize(width: 26, height: 28)
+        let beamPad = CGPoint(x: 4, y: 4)
+        let beamBox = CGSize(width: 32, height: 34)
         if let image = rasterize(width: beamBox.width, height: beamBox.height, draw: { ctx in
-            bubbly(bubblyIBeamPath(), in: ctx, box: beamBox, pad: CGPoint(x: 2, y: 2),
-                   gloss: CGRect(x: 0, y: 2, width: 22, height: 9))
+            bevel(classicIBeamPath(), in: ctx, pad: beamPad)
         }) {
-            // Centre of the stem is the path's (11, 12).
-            built[.iBeam] = Sprite(image: image, hotSpot: CGPoint(x: 13, y: 14), pointSize: beamBox)
+            built[.iBeam] = Sprite(
+                image: image,
+                hotSpot: CGPoint(x: 12 + beamPad.x, y: 11 + beamPad.y),
+                pointSize: beamBox
+            )
         }
         return built
     }
 
-    /// A slightly stouter arrow than the classic one, tip at the origin.
-    private static func bubblyArrowPath() -> CGPath {
-        let path = CGMutablePath()
-        path.move(to: .zero)
-        path.addLine(to: CGPoint(x: 0, y: 17.5))
-        path.addLine(to: CGPoint(x: 4.6, y: 13.4))
-        path.addLine(to: CGPoint(x: 7.4, y: 19.4))
-        path.addLine(to: CGPoint(x: 10.6, y: 17.9))
-        path.addLine(to: CGPoint(x: 7.8, y: 12.2))
-        path.addLine(to: CGPoint(x: 13.8, y: 12.2))
-        path.closeSubpath()
-        return path
-    }
-
-    /// Chubby pointing hand: index finger, three knuckles, thumb and palm as
-    /// overlapping rounded rects; fingertip at (13, 3).
-    private static func bubblyPointerPath() -> CGPath {
-        let path = CGMutablePath()
-        path.addRoundedRect(in: CGRect(x: 10.2, y: 3.0, width: 5.6, height: 18), cornerWidth: 2.8, cornerHeight: 2.8)
-        path.addRoundedRect(in: CGRect(x: 15.4, y: 12.0, width: 4.8, height: 9), cornerWidth: 2.4, cornerHeight: 2.4)
-        path.addRoundedRect(in: CGRect(x: 19.6, y: 14.0, width: 4.6, height: 8), cornerWidth: 2.3, cornerHeight: 2.3)
-        path.addRoundedRect(in: CGRect(x: 23.4, y: 16.5, width: 4.2, height: 7), cornerWidth: 2.1, cornerHeight: 2.1)
-        path.addRoundedRect(in: CGRect(x: 4.5, y: 15.5, width: 6.5, height: 8), cornerWidth: 3.0, cornerHeight: 3.0)
-        path.addRoundedRect(in: CGRect(x: 7.0, y: 18.5, width: 20.6, height: 12.0), cornerWidth: 5.5, cornerHeight: 5.5)
-        return path
-    }
-
-    /// Chunky I-beam: stem and two serifs; centred on (11, 12).
-    private static func bubblyIBeamPath() -> CGPath {
-        let path = CGMutablePath()
-        path.addRoundedRect(in: CGRect(x: 8.9, y: 3.5, width: 4.2, height: 17), cornerWidth: 1.6, cornerHeight: 1.6)
-        path.addRoundedRect(in: CGRect(x: 4.0, y: 2.0, width: 14, height: 4.2), cornerWidth: 2.1, cornerHeight: 2.1)
-        path.addRoundedRect(in: CGRect(x: 4.0, y: 17.8, width: 14, height: 4.2), cornerWidth: 2.1, cornerHeight: 2.1)
-        return path
-    }
-
-    /// Soft shadow, fat white rim, dark gradient body with a gloss across
-    /// `gloss` (path coordinates), then optional crease lines. `pad` is
-    /// where the path's origin sits inside `box`.
-    private static func bubbly(
-        _ path: CGPath, in ctx: CGContext, box: CGSize, pad: CGPoint, gloss: CGRect,
-        creases: [(CGPoint, CGPoint)] = []
-    ) {
-        let rim = 3.4
-        ctx.translateBy(x: pad.x, y: pad.y)
-        // Shadow, cast by the rim.
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -1.3), blur: 2.6, color: CGColor(gray: 0, alpha: 0.38))
-        ctx.addPath(path)
-        ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
-        ctx.setLineWidth(rim)
-        ctx.setLineJoin(.round)
-        ctx.setLineCap(.round)
-        ctx.strokePath()
-        ctx.restoreGState()
-        // Rim.
-        ctx.addPath(path)
-        ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
-        ctx.setLineWidth(rim)
-        ctx.setLineJoin(.round)
-        ctx.setLineCap(.round)
-        ctx.strokePath()
-        // Body: the fill plus a round-joined stroke, as one alpha mask so the
-        // gradient has no seams and the corners come out rounded.
-        guard let mask = bodyMask(path, box: box, pad: pad) else { return }
-        ctx.saveGState()
-        // clip(to:mask:) takes the mask in the context's current space; undo
-        // the padding and the flip so it lands on the whole box.
-        ctx.translateBy(x: -pad.x, y: -pad.y)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: 0, y: -box.height)
-        ctx.clip(to: CGRect(origin: .zero, size: box), mask: mask)
-        ctx.translateBy(x: 0, y: box.height)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: pad.x, y: pad.y)
-        let space = CGColorSpace(name: CGColorSpace.sRGB)!
-        let bounds = path.boundingBox
-        if let body = CGGradient(colorsSpace: space, colors: [
-            CGColor(srgbRed: 0.40, green: 0.40, blue: 0.45, alpha: 1),
-            CGColor(srgbRed: 0.05, green: 0.05, blue: 0.07, alpha: 1),
-        ] as CFArray, locations: [0, 1]) {
-            ctx.drawLinearGradient(body, start: CGPoint(x: bounds.minX, y: bounds.minY),
-                                   end: CGPoint(x: bounds.maxX, y: bounds.maxY), options: [])
+    /// The bundled cute-arrow.svg: black 3D silhouette with a white face.
+    private static func drawCuteArrow(in ctx: CGContext) {
+        guard let paths = cuteArrowPaths() else {
+            bevel(classicArrowPath(), in: ctx, pad: CGPoint(x: 8, y: 4))
+            return
         }
-        if let sheen = CGGradient(colorsSpace: space, colors: [
-            CGColor(gray: 1, alpha: 0.42), CGColor(gray: 1, alpha: 0),
-        ] as CFArray, locations: [0, 1]) {
-            ctx.drawLinearGradient(sheen, start: CGPoint(x: gloss.minX, y: gloss.minY),
-                                   end: CGPoint(x: gloss.minX, y: gloss.maxY), options: [])
-        }
-        ctx.restoreGState()
-        if !creases.isEmpty {
-            ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.55))
-            ctx.setLineWidth(1.1)
-            ctx.setLineCap(.round)
-            for (a, b) in creases {
-                ctx.move(to: a)
-                ctx.addLine(to: b)
-            }
-            ctx.strokePath()
-        }
-    }
-
-    private static func bodyMask(_ path: CGPath, box: CGSize, pad: CGPoint) -> CGImage? {
-        let pixelW = Int(box.width * raster)
-        let pixelH = Int(box.height * raster)
-        guard let ctx = CGContext(
-            data: nil, width: pixelW, height: pixelH,
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return nil }
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
-        ctx.translateBy(x: 0, y: CGFloat(pixelH))
-        ctx.scaleBy(x: raster, y: -raster)
-        ctx.translateBy(x: pad.x, y: pad.y)
-        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
-        ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
-        ctx.setLineWidth(1.6)
-        ctx.setLineJoin(.round)
-        ctx.setLineCap(.round)
-        ctx.addPath(path)
-        ctx.strokePath()
-        ctx.addPath(path)
+        ctx.addPath(paths.outer)
         ctx.fillPath()
-        return ctx.makeImage()
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.addPath(paths.inner)
+        ctx.fillPath()
+    }
+
+    private static func cuteArrowPaths() -> (outer: CGPath, inner: CGPath)? {
+        guard let url = Bundle.module.url(
+            forResource: "cute-arrow", withExtension: "svg", subdirectory: "Resources/Cursors"
+        ), let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let ds = svgPathData(in: text)
+        guard ds.count >= 2 else { return nil }
+        return (cgPath(svgPath: ds[0]), cgPath(svgPath: ds[1]))
+    }
+
+    private static func svgPathData(in svg: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"path d="([^"]+)""#) else { return [] }
+        let ns = svg as NSString
+        return regex.matches(in: svg, range: NSRange(location: 0, length: ns.length)).map {
+            ns.substring(with: $0.range(at: 1))
+        }
+    }
+
+    /// Absolute M / L / C / Z only — enough for cute-arrow.svg.
+    private static func cgPath(svgPath d: String) -> CGPath {
+        let path = CGMutablePath()
+        guard let regex = try? NSRegularExpression(
+            pattern: #"[MLCZ]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?"#
+        ) else { return path }
+        let ns = d as NSString
+        let tokens = regex.matches(in: d, range: NSRange(location: 0, length: ns.length)).map {
+            ns.substring(with: $0.range)
+        }
+        var i = 0
+        var cmd = "M"
+        var x: CGFloat = 0, y: CGFloat = 0
+        var start = CGPoint.zero
+        func num() -> CGFloat {
+            let v = CGFloat(Double(tokens[i]) ?? 0)
+            i += 1
+            return v
+        }
+        while i < tokens.count {
+            let t = tokens[i]
+            if t.count == 1, t.first?.isLetter == true {
+                cmd = t
+                i += 1
+                if cmd == "Z" {
+                    path.closeSubpath()
+                    x = start.x
+                    y = start.y
+                }
+                continue
+            }
+            switch cmd {
+            case "M":
+                x = num(); y = num()
+                start = CGPoint(x: x, y: y)
+                path.move(to: start)
+                cmd = "L"
+            case "L":
+                x = num(); y = num()
+                path.addLine(to: CGPoint(x: x, y: y))
+            case "C":
+                let x1 = num(), y1 = num(), x2 = num(), y2 = num()
+                x = num(); y = num()
+                path.addCurve(
+                    to: CGPoint(x: x, y: y),
+                    control1: CGPoint(x: x1, y: y1),
+                    control2: CGPoint(x: x2, y: y2)
+                )
+            default:
+                i += 1
+            }
+        }
+        return path
+    }
+
+    /// Soft gray shadow, stacked black copies along `bevelExtrude` for the
+    /// 3D side, then a white face with a black rim. `pad` is where the
+    /// path's origin sits inside the sprite box.
+    private static func bevel(_ path: CGPath, in ctx: CGContext, pad: CGPoint) {
+        ctx.translateBy(x: pad.x, y: pad.y)
+        let black = CGColor(gray: 0, alpha: 1)
+        let white = CGColor(gray: 1, alpha: 1)
+
+        func stamp(_ fill: CGColor, stroke: CGColor?) {
+            ctx.setFillColor(fill)
+            ctx.setLineWidth(bevelOutline)
+            ctx.setLineJoin(.round)
+            ctx.setLineCap(.round)
+            ctx.addPath(path)
+            ctx.fillPath()
+            if let stroke {
+                ctx.setStrokeColor(stroke)
+                ctx.addPath(path)
+                ctx.strokePath()
+            }
+        }
+
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 1.2, height: -2.4),
+            blur: 3.4,
+            color: CGColor(gray: 0.22, alpha: 0.28)
+        )
+        ctx.translateBy(x: bevelExtrude.x, y: bevelExtrude.y)
+        stamp(black, stroke: black)
+        ctx.restoreGState()
+
+        let dist = hypot(bevelExtrude.x, bevelExtrude.y)
+        let steps = max(1, Int(ceil(dist * raster)))
+        for i in 1...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            ctx.saveGState()
+            ctx.translateBy(x: bevelExtrude.x * t, y: bevelExtrude.y * t)
+            stamp(black, stroke: black)
+            ctx.restoreGState()
+        }
+
+        stamp(black, stroke: black)
+        stamp(white, stroke: nil)
     }
 
     // MARK: - Raster + composite

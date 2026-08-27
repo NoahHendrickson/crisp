@@ -329,7 +329,7 @@ struct AIPanelView: View {
                     .onSubmit(send)
                     Button(action: send) {
                         if chat.running {
-                            ProgressView().controlSize(.mini)
+                            ThemedSpinner(size: 12)
                         } else {
                             Icon(name: "arrow-return", size: 12, fallback: "return")
                         }

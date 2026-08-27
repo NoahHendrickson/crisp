@@ -427,6 +427,67 @@ struct SelectTriggerLabel: View {
 
 // MARK: - Progress (progress.tsx + Figma 43:5350)
 
+/// Chasing 2×3 ring of rounded pixels (the AI status chip). Drawn at 16pt;
+/// the source canvas is 56pt and scaled down. Steps at 10 fps; reduced
+/// motion freezes a mid-chase frame.
+struct ThemedSpinner: View {
+    var color: Color = Color(hex: "#4ADE80")
+    var size: CGFloat = 16
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Walk order around a 2-col × 3-row ring laid out in a 2×4 cell grid.
+    private static let ring: [(col: Int, row: Int)] = [
+        (0, 0), (1, 0), (1, 1), (1, 2), (0, 2), (0, 1)
+    ]
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                canvas(t: 0.6)
+            } else {
+                TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
+                    canvas(t: timeline.date.timeIntervalSinceReferenceDate)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+
+    private func canvas(t: TimeInterval) -> some View {
+        Canvas { context, canvasSize in
+            let s: CGFloat = 56
+            context.scaleBy(x: canvasSize.width / s, y: canvasSize.height / s)
+            let cols = 2, rows = 4
+            let gap: CGFloat = 2.4
+            let cell = min((s - 6) / CGFloat(cols) - gap, (s - 6) / CGFloat(rows) - gap)
+            let gridW = CGFloat(cols) * (cell + gap) - gap
+            let gridH = CGFloat(rows) * (cell + gap) - gap
+            let originX = (s - gridW) / 2
+            let originY = (s - gridH) / 2
+            let head = Int((t * 10).rounded(.down)) % 6
+            for k in 0..<6 {
+                let d = (k - head + 6) % 6
+                let alpha = d < 4 ? 1 - Double(d) / 4 : 0
+                guard alpha >= 0.02 else { continue }
+                let i = Self.ring[k].col
+                let j = Self.ring[k].row
+                let rect = CGRect(
+                    x: originX + CGFloat(i) * (cell + gap),
+                    y: originY + CGFloat(j) * (cell + gap),
+                    width: cell, height: cell
+                )
+                context.opacity = alpha
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: cell * 0.45),
+                    with: .color(color)
+                )
+            }
+        }
+    }
+}
+
 /// 8pt pill track with a 1px border; the indicator is the raised surface
 /// with a foreground/80 fill (per the Crisp screen), inset 1pt.
 struct ThemedProgress: View {

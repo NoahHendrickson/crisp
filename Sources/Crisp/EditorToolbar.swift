@@ -5,9 +5,9 @@ import SwiftUI
 // the camera follows the cursor or holds a pinned viewport — and both of
 // those controls come alive inside a zoom's hold and grey out elsewhere.
 // Then an overflow menu and, behind a hairline, the AI editor, Send
-// timestamp to chat, and Compare. Timing is edited by dragging the
-// timeline, so there is deliberately little to set by hand: the AI editor
-// does the editorial work.
+// timestamp to chat, Compare, and Export with zooms. Timing is edited by
+// dragging the timeline, so there is deliberately little to set by hand:
+// the AI editor does the editorial work.
 extension EditorView {
     // MARK: - Where the playhead is
 
@@ -154,7 +154,7 @@ extension EditorView {
                 withAnimation { showAIPanel.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    if aiChat.running { ProgressView().controlSize(.mini) }
+                    if aiChat.running { ThemedSpinner() }
                     Text("AI editor")
                 }
             }
@@ -184,12 +184,24 @@ extension EditorView {
             .tooltip(comparing
                   ? "Back to the normal preview"
                   : "Play the edited zooms before and after your changes, stacked top and bottom")
-            Spacer(minLength: 0)
             if let fraction = model.exportProgress[folder] {
                 ExportProgressControls(fraction: fraction, width: 200) {
                     model.cancelExport(recording)
                 }
+            } else {
+                Button {
+                    recording.savePlan(segments, cursorStyle: cursorStyle)
+                    model.export(recording)
+                } label: {
+                    HStack(spacing: 6) {
+                        Icon(name: "export-duotone", size: 16, fallback: "square.and.arrow.up")
+                        Text("Export with zooms")
+                    }
+                }
+                .buttonStyle(.themed(.outline, size: .md, leadingIcon: true))
+                .tooltip("Render the zoom plan to a new \(model.exportFormat.rawValue) file next to the master. Earlier exports are kept.")
             }
+            Spacer(minLength: 0)
         }
         .frame(height: ControlSizeToken.md.height)
     }
@@ -256,7 +268,7 @@ extension EditorView {
         ) { _ in
             Icon(name: "dots-three-outline-vertical", size: 16, fallback: "ellipsis")
         }
-        .tooltip("More: cursor style, add or remove a zoom, reset all, export")
+        .tooltip("More: cursor style, add or remove a zoom, reset all")
     }
 
     func moreItems() -> [DropdownItem] {
@@ -281,13 +293,6 @@ extension EditorView {
                                   detail: "Regenerate from the click log; Compare keeps your edits") {
             resetZoomsToDefault()
         })
-        if model.exportProgress[folder] == nil {
-            items.append(DropdownItem(id: "export", label: "Export with zooms",
-                                      detail: "\(model.exportFormat.rawValue), saved next to the master") {
-                recording.savePlan(segments, cursorStyle: cursorStyle)
-                model.export(recording)
-            })
-        }
         return items
     }
 }
