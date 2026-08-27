@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 import AVFoundation
 import CoreImage
 import VideoToolbox
@@ -45,11 +44,13 @@ final class Renderer {
         let fps = 60.0
 
         // Use the hand-edited plan when one exists; otherwise auto-generate.
-        let planner = ZoomPlanner(width: Double(width), height: Double(height))
-        let segments = recording.loadPlanSegments()
+        let planner = ZoomPlanner(meta: meta)
+        let plan = recording.loadPlan()
+        let segments = plan?.segments
             ?? planner.segments(events: meta.events, duration: duration)
+        let cursorStyle = plan?.cursorStyle ?? .classic
         let keys = planner.keyframes(from: segments, duration: duration)
-        let composer = FrameComposer(meta: meta, keys: keys)
+        let composer = FrameComposer(meta: meta, keys: keys, cursorStyle: cursorStyle)
 
         // Reader: decode to 10-bit RGB.
         let reader = try AVAssetReader(asset: asset)
@@ -150,7 +151,7 @@ final class Renderer {
         // the export: if it cannot be written the export is not a success and
         // the defer above discards the video rather than leaving an
         // unversioned file behind.
-        try Recording.writePlan(segments, to: Recording.planSnapshotURL(for: outputURL))
+        try Recording.writePlan(segments, cursorStyle: cursorStyle, to: Recording.planSnapshotURL(for: outputURL))
         succeeded = true
         progress(1)
         return outputURL

@@ -159,7 +159,7 @@ struct ContentView: View {
             ButtonGroupSeparator(height: 32)
 
             DropdownButton(
-                id: "screenshot.format", alignment: .trailing,
+                id: "screenshot.format", edge: .top, alignment: .trailing,
                 style: { _ in .themed(.outline, size: .lg, iconOnly: true, corners: .trailing(Theme.radiusSm)) },
                 items: {
                     ScreenshotFormat.allCases.map { format in
@@ -470,7 +470,7 @@ struct ContentView: View {
                     .foregroundStyle(Theme.mutedForeground)
                 Text("Screen Recording permission needed")
                     .font(Theme.font(.label14))
-                Text("Toggle Crisp on in System Settings. Crisp re-checks automatically every 20 seconds — or hit Check Again. If macOS asks to quit and reopen the app, that's fine: an in-flight recording is finalized safely first.")
+                Text("Toggle Crisp on in System Settings, then hit Check Again. If macOS asks to quit and reopen the app, that's fine: an in-flight recording is finalized safely first.")
                     .font(Theme.font(.body12))
                     .foregroundStyle(Theme.mutedForeground)
                     .multilineTextAlignment(.center)
@@ -707,23 +707,23 @@ private enum LibraryFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// "1 Zoom", "3 Pans", "2 Exports".
+/// "1 Zoom", "3 Steps".
 private func countLabel(_ n: Int, _ noun: String) -> String {
     "\(n) \(noun)\(n == 1 ? "" : "s")"
 }
 
-/// Brand-green zoom / pan counts (Figma 75:11919).
-private struct ZoomPanTag: View {
+/// Brand-green zoom / step counts (Figma 75:11919).
+private struct ZoomStepTag: View {
     let zoomCount: Int
-    let panCount: Int
+    let stepCount: Int
 
     var body: some View {
         HStack(spacing: 10) {
             if zoomCount > 0 {
                 Text(countLabel(zoomCount, "Zoom"))
             }
-            if panCount > 0 {
-                Text(countLabel(panCount, "Pan"))
+            if stepCount > 0 {
+                Text(countLabel(stepCount, "Step"))
             }
         }
         .padding(.horizontal, 4)
@@ -734,7 +734,7 @@ private struct ZoomPanTag: View {
 
 /// Flat library row (Figma 76:13109 / 76:13499): name (double-click to
 /// rename), hover 32pt actions, then a Body/12 line — "MOV 50.3MB" plus
-/// the zoom/pan tag.
+/// the zoom/step tag.
 private struct RecordingRow: View {
     @EnvironmentObject var model: AppModel
     let recording: Recording
@@ -775,8 +775,8 @@ private struct RecordingRow: View {
                 Text(fileInfo)
                     .foregroundStyle(Theme.mutedForeground)
                     .lineLimit(1)
-                if summary.zoomCount > 0 || summary.panCount > 0 {
-                    ZoomPanTag(zoomCount: summary.zoomCount, panCount: summary.panCount)
+                if summary.zoomCount > 0 || summary.stepCount > 0 {
+                    ZoomStepTag(zoomCount: summary.zoomCount, stepCount: summary.stepCount)
                         .fixedSize()
                 }
             }
@@ -912,43 +912,6 @@ private struct RecordingActionButtons: View {
             }
             .buttonStyle(.themed(.ghost, size: .md, iconOnly: true))
             .tooltip("Move recording and all exports to Trash")
-        }
-    }
-}
-
-/// ButtonGroup/Split: "Export with zooms" + dropdown choosing the file type.
-/// The chosen format is `AppModel.exportFormat` (persisted).
-struct ExportSplitButton: View {
-    @EnvironmentObject var model: AppModel
-    let title: String
-    var size: ControlSizeToken = .xs
-    /// Distinguishes this button's dropdown when several are in one window.
-    var menuID: String = "main"
-    /// Where the format menu opens relative to the button.
-    var edge: VerticalEdge = .bottom
-    let action: () -> Void
-
-    var body: some View {
-        HStack(spacing: -1) {
-            Button(title, action: action)
-                .buttonStyle(.themed(.primary, size: size, corners: .leading(Theme.radiusMd)))
-                .tooltip("Render the zoom plan to a new \(model.exportFormat.rawValue) file next to the master. Earlier exports are kept.")
-            ButtonGroupSeparator(height: size.height)
-            DropdownButton(
-                id: "export.format.\(menuID)", edge: edge, alignment: .trailing,
-                style: { _ in .themed(.primary, size: size, iconOnly: true, corners: .trailing(Theme.radiusMd)) },
-                items: {
-                    ExportFormat.allCases.map { format in
-                        DropdownItem(id: format.rawValue, label: format.rawValue,
-                                     checked: model.exportFormat == format) {
-                            model.exportFormat = format
-                        }
-                    }
-                }
-            ) { _ in
-                Icon(name: "caret-down", size: 16, fallback: "chevron.down")
-            }
-            .tooltip("Export file type: \(model.exportFormat.rawValue)")
         }
     }
 }

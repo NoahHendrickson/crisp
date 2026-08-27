@@ -22,9 +22,9 @@ final class CompareComposer: FrameComposing {
     var width: Double { after.width }
     var height: Double { after.height * 2 + Self.gap }
 
-    init(meta: RecordingMeta, before: [ZoomPlanner.Keyframe], after: [ZoomPlanner.Keyframe]) {
-        self.before = FrameComposer(meta: meta, keys: before)
-        self.after = FrameComposer(meta: meta, keys: after)
+    init(meta: RecordingMeta, before: [ZoomPlanner.Keyframe], after: [ZoomPlanner.Keyframe], cursorStyle: CursorStyle) {
+        self.before = FrameComposer(meta: meta, keys: before, cursorStyle: cursorStyle)
+        self.after = FrameComposer(meta: meta, keys: after, cursorStyle: cursorStyle)
     }
 
     func compose(source: CIImage, at t: Double) -> CIImage {
@@ -120,12 +120,15 @@ struct PlanDiff {
     static func sameContent(_ a: ZoomSegment, _ b: ZoomSegment) -> Bool {
         func near(_ x: Double, _ y: Double, _ tolerance: Double) -> Bool { abs(x - y) <= tolerance }
         guard near(a.start, b.start, 0.011), near(a.end, b.end, 0.011), near(a.zoom, b.zoom, 0.011),
-              near(a.cx, b.cx, 0.5), near(a.cy, b.cy, 0.5),
-              a.pans.count == b.pans.count else { return false }
-        for (p, q) in zip(a.pans.sorted { $0.t < $1.t }, b.pans.sorted { $0.t < $1.t }) {
-            guard near(p.t, q.t, 0.011), near(p.duration, q.duration, 0.011),
-                  near(p.cx, q.cx, 0.5), near(p.cy, q.cy, 0.5),
-                  near(p.zoom ?? -1, q.zoom ?? -1, 0.011) else { return false }
+              near(a.zoomIn ?? -1, b.zoomIn ?? -1, 0.011), near(a.zoomOut ?? -1, b.zoomOut ?? -1, 0.011),
+              a.steps.count == b.steps.count, a.pins.count == b.pins.count else { return false }
+        let byStart: (PinWindow, PinWindow) -> Bool = { ($0.from ?? -1) < ($1.from ?? -1) }
+        for (p, q) in zip(a.pins.sorted(by: byStart), b.pins.sorted(by: byStart)) {
+            guard near(p.x, q.x, 0.5), near(p.y, q.y, 0.5),
+                  near(p.from ?? -1, q.from ?? -1, 0.011), near(p.until ?? -1, q.until ?? -1, 0.011) else { return false }
+        }
+        for (p, q) in zip(a.steps.sorted { $0.t < $1.t }, b.steps.sorted { $0.t < $1.t }) {
+            guard near(p.t, q.t, 0.011), near(p.zoom, q.zoom, 0.011) else { return false }
         }
         return true
     }

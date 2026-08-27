@@ -9,8 +9,6 @@ enum MasterCodec: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
 
-    var fileExtension: String { "mov" }
-
     /// Shown under the name in the codec select.
     var detail: String {
         switch self {
@@ -50,7 +48,7 @@ enum ExportFormat: String, CaseIterable, Identifiable, Codable {
 /// Times are in seconds relative to the capture session start (first video frame).
 struct MouseEvent: Codable {
     enum Kind: String, Codable {
-        case leftDown, leftUp, rightDown, scroll
+        case leftDown, leftUp, rightDown
     }
 
     var t: Double
@@ -60,11 +58,19 @@ struct MouseEvent: Codable {
     var y: Double
 }
 
+/// Appearance of the system cursor at a sample. Missing/nil in JSON is arrow
+/// (old recordings, and ticks where the cursor was the default arrow).
+enum CursorKind: String, Codable {
+    case arrow, pointer, iBeam
+}
+
 /// Periodic cursor position sample, same coordinate space as MouseEvent.
 struct CursorSample: Codable {
     var t: Double
     var x: Double
     var y: Double
+    /// nil = arrow. Omitted from JSON so arrow ticks stay `{t,x,y}`.
+    var kind: CursorKind? = nil
 }
 
 /// Sidecar metadata written next to master.mov as events.json.
@@ -87,38 +93,65 @@ struct RecordingMeta: Codable {
     var samples: [CursorSample]
 }
 
-/// A camera move within a zoom segment: at time `t` the camera glides from its
-/// current center to (cx, cy) over `duration` seconds, staying zoomed.
-struct PanMove: Codable, Identifiable, Equatable {
+/// A mid-hold zoom keyframe: from `t` the camera eases to `zoom` (over the
+/// planner's `stepDuration`) and holds it for the rest of the zoom.
+struct ZoomStep: Codable, Identifiable, Equatable {
     var id = UUID()
     var t: Double
-    var duration: Double = 0.5
-    /// Target center in master-video pixels (top-left origin).
-    var cx: Double
-    var cy: Double
-    /// Zoom level from this move on, for "zoom in further" steps inside a
-    /// hold. nil keeps whatever level the camera already has.
-    var zoom: Double? = nil
+    var zoom: Double
 }
 
-/// One zoom: the camera holds fully zoomed on (cx, cy) from `start` to `end`
-/// (seconds, master-video timeline); eased transitions are added around it.
-/// `pans` are re-centering moves that happen while zoomed.
+/// A stretch of a zoom's hold where the camera holds a fixed framing
+/// instead of following the cursor — for action that isn't under the
+/// mouse. `x`/`y` are master-video pixels; `from`/`until` are seconds on
+/// the master timeline, nil meaning the hold's start / end. A zoom can
+/// carry several, one after another; a pin with no `until` is "open":
+/// it holds to the end of the zoom until the user releases it.
+struct PinWindow: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var x: Double
+    var y: Double
+    var from: Double? = nil
+    var until: Double? = nil
+
+    var point: CGPoint {
+        get { CGPoint(x: x, y: y) }
+        set { x = Double(newValue.x); y = Double(newValue.y) }
+    }
+}
+
+/// One zoom: the camera holds fully zoomed at `zoom` from `start` to `end`
+/// (seconds, master-video timeline); eased transitions are added around it
+/// and the framing follows the recorded cursor automatically. `steps` change
+/// the level part-way through the hold; `pins` hold the framing still for
+/// parts of it.
 struct ZoomSegment: Codable, Identifiable, Equatable {
     var id = UUID()
     var start: Double
     var end: Double
     var zoom: Double
-    /// Initial center in master-video pixels (top-left origin).
-    var cx: Double
-    var cy: Double
-    var pans: [PanMove] = []
+    var steps: [ZoomStep] = []
+    var pins: [PinWindow] = []
+    /// Ease-in / ease-out length in seconds. nil = the planner defaults
+    /// (`zoomInDuration` / `zoomOutDuration`). A longer zoom-in starts the
+    /// camera earlier so it still arrives at the hold on time, just slower.
+    var zoomIn: Double? = nil
+    var zoomOut: Double? = nil
 }
 
-/// Custom decoding so plan.json files written before pans existed still load.
+/// Lenient decoding: plans written before steps existed load, plans from
+/// the era of hand-placed pans keep their "zoom in further" moves as steps
+/// (their centres are dropped — the follower frames the shot now), and a
+/// plan's single `pinX`/`pinY`/`pinFrom`/`pinUntil` becomes its one pin.
 extension ZoomSegment {
     private enum CodingKeys: String, CodingKey {
-        case id, start, end, zoom, cx, cy, pans
+        case id, start, end, zoom, steps, pans, pins, pinX, pinY, pinFrom, pinUntil, zoomIn, zoomOut
+    }
+
+    private struct LegacyPan: Decodable {
+        var id: UUID?
+        var t: Double
+        var zoom: Double?
     }
 
     init(from decoder: Decoder) throws {
@@ -127,9 +160,64 @@ extension ZoomSegment {
         start = try container.decode(Double.self, forKey: .start)
         end = try container.decode(Double.self, forKey: .end)
         zoom = try container.decode(Double.self, forKey: .zoom)
-        cx = try container.decode(Double.self, forKey: .cx)
-        cy = try container.decode(Double.self, forKey: .cy)
-        pans = try container.decodeIfPresent([PanMove].self, forKey: .pans) ?? []
+        var steps = try container.decodeIfPresent([ZoomStep].self, forKey: .steps) ?? []
+        if steps.isEmpty, let pans = try? container.decodeIfPresent([LegacyPan].self, forKey: .pans) {
+            steps = pans.compactMap { pan in
+                pan.zoom.map { ZoomStep(id: pan.id ?? UUID(), t: pan.t, zoom: $0) }
+            }
+        }
+        self.steps = steps
+        var pins = try container.decodeIfPresent([PinWindow].self, forKey: .pins) ?? []
+        if pins.isEmpty,
+           let x = try container.decodeIfPresent(Double.self, forKey: .pinX),
+           let y = try container.decodeIfPresent(Double.self, forKey: .pinY) {
+            pins = [PinWindow(
+                x: x, y: y,
+                from: try container.decodeIfPresent(Double.self, forKey: .pinFrom),
+                until: try container.decodeIfPresent(Double.self, forKey: .pinUntil)
+            )]
+        }
+        self.pins = pins
+        zoomIn = try container.decodeIfPresent(Double.self, forKey: .zoomIn)
+        zoomOut = try container.decodeIfPresent(Double.self, forKey: .zoomOut)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(zoom, forKey: .zoom)
+        try container.encode(steps, forKey: .steps)
+        if !pins.isEmpty { try container.encode(pins, forKey: .pins) }
+        try container.encodeIfPresent(zoomIn, forKey: .zoomIn)
+        try container.encodeIfPresent(zoomOut, forKey: .zoomOut)
+    }
+}
+
+/// How the re-drawn cursor looks in the preview and the export. Chosen per
+/// recording and saved in plan.json; missing there is classic (older plans).
+enum CursorStyle: String, Codable, CaseIterable, Identifiable {
+    /// The macOS arrow, hand and I-beam, redrawn as flat vectors.
+    case classic
+    /// Chunky rounded shapes with a glossy body and soft shadow, drawn a
+    /// little bigger.
+    case bubbly
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .classic: return "Classic cursor"
+        case .bubbly: return "Cute cursor"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .classic: return "The macOS pointer, redrawn sharp at any zoom"
+        case .bubbly: return "Rounded, glossy and a little bigger"
+        }
     }
 }
 
@@ -138,6 +226,8 @@ extension ZoomSegment {
 struct ZoomPlan: Codable {
     var version: Int = 1
     var segments: [ZoomSegment]
+    /// nil = classic. Omitted from JSON so older plans round-trip unchanged.
+    var cursorStyle: CursorStyle? = nil
 }
 
 /// A recording on disk: a folder containing master.mov + events.json
@@ -150,31 +240,30 @@ struct Recording: Identifiable, Equatable {
     var eventsURL: URL { folder.appendingPathComponent("events.json") }
     var planURL: URL { folder.appendingPathComponent("plan.json") }
 
+    func loadPlan() -> ZoomPlan? {
+        Self.loadPlan(from: planURL)
+    }
+
+    static func loadPlan(from url: URL) -> ZoomPlan? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ZoomPlan.self, from: data)
+    }
+
     func loadPlanSegments() -> [ZoomSegment]? {
-        Self.loadPlanSegments(from: planURL)
+        loadPlan()?.segments
     }
 
-    static func loadPlanSegments(from url: URL) -> [ZoomSegment]? {
-        guard let data = try? Data(contentsOf: url),
-              let plan = try? JSONDecoder().decode(ZoomPlan.self, from: data) else { return nil }
-        return plan.segments
-    }
-
-    func savePlan(_ segments: [ZoomSegment]) {
-        Self.savePlan(segments, to: planURL)
-    }
-
-    static func savePlan(_ segments: [ZoomSegment], to url: URL) {
-        try? writePlan(segments, to: url)
+    func savePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle) {
+        try? Self.writePlan(segments, cursorStyle: cursorStyle, to: planURL)
     }
 
     /// Throwing form for callers that must know the plan reached disk
     /// (the export snapshot gates "export succeeded" on it).
-    static func writePlan(_ segments: [ZoomSegment], to url: URL) throws {
+    static func writePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(ZoomPlan(segments: segments))
-        try data.write(to: url, options: .atomic)
+        let plan = ZoomPlan(segments: segments, cursorStyle: cursorStyle == .classic ? nil : cursorStyle)
+        try encoder.encode(plan).write(to: url, options: .atomic)
     }
 
     /// Sidecar written next to each export with the zoom plan that produced it
@@ -186,12 +275,6 @@ struct Recording: Identifiable, Equatable {
     }
 
     var name: String { folder.lastPathComponent }
-
-    /// The master plus every export, for the expandable library row.
-    var files: [RecordingFile] {
-        [RecordingFile(url: masterURL, kind: .master)]
-            + exportURLs.map { RecordingFile(url: $0, kind: .export(Self.exportIndex(of: $0.deletingPathExtension().lastPathComponent) ?? 1)) }
-    }
 
     /// Existing exports, oldest first ("export.mov", "export 2.mp4", …).
     var exportURLs: [URL] {
@@ -212,12 +295,12 @@ struct Recording: Identifiable, Equatable {
 
     /// What the library sidebar shows under a recording's name: the container
     /// and size of the newest file (latest export, else the master), plus the
-    /// zoom and pan counts of the current plan.json.
+    /// zoom and step counts of the current plan.json.
     struct Summary: Equatable {
         var format: String
         var fileSize: Int64?
         var zoomCount: Int
-        var panCount: Int
+        var stepCount: Int
     }
 
     var summary: Summary {
@@ -228,7 +311,7 @@ struct Recording: Identifiable, Equatable {
             format: url.pathExtension.uppercased(),
             fileSize: size,
             zoomCount: segments.count,
-            panCount: segments.reduce(0) { $0 + $1.pans.count }
+            stepCount: segments.reduce(0) { $0 + $1.steps.count }
         )
     }
 
@@ -286,46 +369,9 @@ struct Recording: Identifiable, Equatable {
     }
 }
 
-/// One video inside a recording folder: the original master or a numbered export.
-struct RecordingFile: Identifiable, Equatable {
-    enum Kind: Equatable {
-        case master
-        case export(Int)
-    }
-
-    var id: URL { url }
-    let url: URL
-    let kind: Kind
-
-    var isMaster: Bool { kind == .master }
-
-    /// "Original", "Export", "Export 2", …
-    var title: String {
-        switch kind {
-        case .master: return "Original"
-        case .export(let n): return n == 1 ? "Export" : "Export \(n)"
-        }
-    }
-
-    /// "MOV" / "MP4"
-    var format: String { url.pathExtension.uppercased() }
-
-    var planSnapshotURL: URL? {
-        isMaster ? nil : Recording.planSnapshotURL(for: url)
-    }
-
-    /// Number of zooms in this export's plan snapshot; nil for the master or
-    /// exports made before snapshots existed.
-    var zoomCount: Int? {
-        guard let planSnapshotURL else { return nil }
-        return Recording.loadPlanSegments(from: planSnapshotURL)?.count
-    }
-
-    var fileSize: Int64? {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
-    }
-
-    var modifiedAt: Date? {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-    }
+/// "0:04" — a moment as m:ss, rounded to the second: how the editor's
+/// toolbar, the AI panel's timestamp chips and the agent's briefing show it.
+func shortTimecode(_ t: Double) -> String {
+    let total = Int(max(0, t).rounded())
+    return String(format: "%d:%02d", total / 60, total % 60)
 }

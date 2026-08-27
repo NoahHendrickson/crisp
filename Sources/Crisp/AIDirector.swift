@@ -4,14 +4,15 @@ import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
 
-/// "AI Polish": hand the current zoom plan + click log + real frames from the
-/// video to a locally-installed, subscription-authenticated agent CLI
-/// (Claude Code or Codex) and get back a touched-up plan — better timing,
-/// fewer redundant zooms/pans, centers framed on actual UI elements.
+/// The AI editor: hand the current zoom plan + click log + annotated frames
+/// from the video to a locally-installed, subscription-authenticated agent
+/// CLI (Claude Code or Codex) — with a standing brief and `./crisp` tools to
+/// see any moment, preview its own plan and validate it — and get back a
+/// touched-up plan: better timing, fewer redundant zooms, the right levels.
 ///
 /// No API keys, no OAuth: the CLIs bring the user's existing sign-in.
-struct AIProvider: Identifiable, Equatable, Hashable {
-    enum Kind: String, CaseIterable {
+struct AIProvider: Identifiable, Equatable {
+    enum Kind: String {
         case claude = "Claude"
         case codex = "Codex"
     }
@@ -29,7 +30,7 @@ struct AIProvider: Identifiable, Equatable, Hashable {
 }
 
 /// A model choice for one provider. `id` is what's passed to the CLI.
-struct AIModel: Identifiable, Equatable, Hashable {
+struct AIModel: Identifiable, Equatable {
     let id: String
     let label: String
     /// Reasoning-effort levels this model accepts, lowest first.
@@ -165,13 +166,21 @@ enum AIDirector {
 
     // MARK: - Session
 
+    /// What one turn produced: the validated plan, and anything the app had
+    /// to change to make it legal. The agent is asked once to fix such
+    /// issues itself; whatever remains is applied clamped and shown to the user.
+    struct Outcome {
+        var plan: [ZoomSegment]
+        var adjustments: [String]
+    }
+
     /// A multi-turn conversation with one agent CLI about one recording.
     ///
     /// Each turn spawns a fresh CLI process that resumes the same provider
     /// session (`claude -p --resume`, `codex exec resume`), so the model keeps
     /// its memory of the video and earlier notes without us holding a
-    /// long-lived child process. The workspace (frames, context.json,
-    /// plan.json) lives for the whole session.
+    /// long-lived child process. The workspace — briefing, `./crisp` tools,
+    /// frames, context.json, plan.json — lives for the whole session.
     final class Session {
         let provider: AIProvider
         /// CLI model id (`--model`); nil leaves the CLI's own default in place.
@@ -184,7 +193,7 @@ enum AIDirector {
         let duration: Double
 
         private let workspace: URL
-        private var frames: [Frame] = []
+        private var frames: [AgentPlan.Frame] = []
         /// Claude: a UUID we choose up front (`--session-id`). Codex: the
         /// thread id reported by its first `thread.started` event. Cleared
         /// whenever a turn fails before the conversation is established so a
@@ -206,6 +215,7 @@ enum AIDirector {
             workspace = FileManager.default.temporaryDirectory
                 .appendingPathComponent("crisp-ai-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+            try AgentTools.installWorkspace(in: workspace, recording: recording)
         }
 
         deinit {
@@ -217,35 +227,94 @@ enum AIDirector {
         /// plan.json the agent wrote.
         func send(
             note: String,
+            timestamp: Double? = nil,
             segments: [ZoomSegment],
             onEvent: @escaping (AIEvent) -> Void
-        ) async throws -> [ZoomSegment] {
+        ) async throws -> Outcome {
             // Frames follow the current plan (one per zoom opening), so refresh
             // them every turn along with context.json — the user may have
             // hand-edited, or the agent may have rewritten the plan last turn.
-            frames = try await AIDirector.extractFrames(
-                masterURL: recording.masterURL, segments: segments, duration: duration, into: workspace
+            frames = try await AgentTools.extractFrames(
+                recording: recording, meta: meta, segments: segments, duration: duration, into: workspace
             )
-            let context = try AIDirector.buildContext(meta: meta, duration: duration, segments: segments, frames: frames)
+            let context = try AgentPlan.encodeContext(meta: meta, duration: duration, segments: segments, frames: frames)
             try context.write(to: workspace.appendingPathComponent("context.json"))
             // Seed plan.json with the current plan so "nothing to change" is a
             // valid outcome: the agent overwrites it, or leaves it as is.
             let planURL = workspace.appendingPathComponent("plan.json")
-            try AIDirector.encodePlan(segments).write(to: planURL)
+            try AgentPlan.encode(segments).write(to: planURL)
 
+            // A note about a moment: hand over that exact frame, annotated,
+            // with where the camera is there, so "this bit" is unambiguous.
+            var moment: String?
+            if let timestamp {
+                let t = min(max(0, timestamp), duration)
+                let name = String(format: "moment_t%05.2f.jpg", t)
+                let planner = ZoomPlanner(meta: meta)
+                let keys = planner.keyframes(from: segments, duration: duration)
+                let camera = ZoomPlanner.evaluate(keys, at: t)
+                if let image = try? await AgentTools.extractFrame(masterURL: recording.masterURL, at: t),
+                   let annotated = AgentTools.annotate(
+                       image, meta: meta, at: t, crop: segments.isEmpty ? nil : camera,
+                       clicks: AgentTools.clicks(in: meta, near: t),
+                       cursor: FrameComposer.cursorPosition(samples: meta.samples, at: t).map { ($0.x, $0.y) },
+                       caption: AgentTools.caption(for: meta, at: t, extra: "the moment the note is about")
+                   ) {
+                    try? AgentTools.writeJPEG(annotated, to: workspace.appendingPathComponent(name))
+                    frames.append(AgentPlan.Frame(file: name, t: t, label: "the moment the user's note is about"))
+                }
+                let covering = segments.enumerated().first { _, seg in
+                    let span = planner.motionSpan(for: seg, duration: duration)
+                    return t >= span.moveStart && t <= span.outEnd
+                }
+                let state = covering.map { index, seg in
+                    String(format: "inside zoom %d (hold %.2f–%.2fs)%@", index + 1, seg.start, seg.end,
+                           seg.pins.isEmpty ? "" : ", pinned")
+                } ?? "at full frame, not inside any zoom"
+                moment = String(
+                    format: "The note is about the moment at %.2fs (%@). The camera there is %@, zoom %.2f× centred on (%.0f, %.0f). See %@ — an annotated still of exactly that frame.",
+                    t, shortTimecode(t), state, camera.zoom, camera.center.x, camera.center.y,
+                    workspace.appendingPathComponent(name).path
+                )
+            }
+
+            try await runTurn(
+                prompt: started
+                    ? AIDirector.followUpPrompt(note: note, moment: moment)
+                    : AIDirector.firstPrompt(note: note, moment: moment, frames: frames, workspace: workspace),
+                onEvent: onEvent
+            )
+
+            var (parsed, issues) = planState(planURL)
+            if !issues.isEmpty {
+                // Give the agent one shot at fixing its own plan; `./crisp
+                // validate` prints exactly these checks, so it can iterate.
+                AppModel.log("AI editor: plan needs fixes, asking the agent: \(issues.joined(separator: " | "))")
+                onEvent(.activity(.other, "Fixing \(issues.count) rule issue\(issues.count == 1 ? "" : "s") in the plan"))
+                try await runTurn(prompt: AIDirector.fixupPrompt(issues: issues), onEvent: onEvent)
+                (parsed, issues) = planState(planURL)
+            }
+            guard let parsed else { throw DirectorError.unparseableOutput(issues.first ?? "unknown problem") }
+            guard !parsed.segments.isEmpty || parsed.declared == 0 else { throw DirectorError.emptyPlan }
+            let tag = [provider.kind.rawValue, model, effort].compactMap { $0 }.joined(separator: " / ")
+            AppModel.log("AI editor (\(tag)): \(segments.count) → \(parsed.segments.count) segments; \(issues.count) adjustment(s)")
+            return Outcome(plan: parsed.segments, adjustments: issues)
+        }
+
+        /// Run one CLI invocation with `prompt`, falling back once to a fresh
+        /// conversation when resuming a stale provider session fails before
+        /// it emits anything (e.g. cleared CLI history).
+        private func runTurn(prompt: String, onEvent: @escaping (AIEvent) -> Void) async throws {
             var retriedFresh = false
             while true {
                 let resuming = started
-                let prompt = resuming
-                    ? AIDirector.followUpPrompt(note: note)
-                    : AIDirector.firstPrompt(note: note, frames: frames, workspace: workspace)
                 try Data(prompt.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
 
                 var sawEvent = false
                 var errorMessage: String?
                 var failure: Error?
                 do {
-                    try await AIDirector.runShell(makeCommand(resume: resuming), cwd: workspace, timeout: 300) { line in
+                    try await AIDirector.runShell(makeCommand(resume: resuming), cwd: workspace, timeout: 900) { line in
                         guard let event = self.parseLine(line, error: &errorMessage) else { return }
                         sawEvent = true
                         onEvent(event)
@@ -259,11 +328,8 @@ enum AIDirector {
                 }
                 guard let failure else { break }
 
-                // A stale provider session (e.g. cleared CLI history) fails —
-                // via exit status or an error envelope — before emitting any
-                // event. Fall back once to a fresh conversation.
                 if resuming && !sawEvent && !retriedFresh && !(failure is CancellationError) {
-                    AppModel.log("AI polish: resume failed, starting a fresh session: \(failure.localizedDescription)")
+                    AppModel.log("AI editor: resume failed, starting a fresh session: \(failure.localizedDescription)")
                     retriedFresh = true
                     started = false
                     sessionID = nil
@@ -274,22 +340,21 @@ enum AIDirector {
                 throw failure
             }
             started = true
+        }
 
-            guard let data = try? Data(contentsOf: planURL) else {
-                throw DirectorError.noPlanWritten
+        /// The plan file as it stands: parsed, with the rule adjustments it
+        /// would need; or nil with the reason it can't be read at all.
+        private func planState(_ url: URL) -> (AgentPlan.Parsed?, [String]) {
+            guard let data = try? Data(contentsOf: url) else {
+                return (nil, ["plan.json is missing — write the plan to plan.json in this directory"])
             }
-            let dto: PlanDTO
             do {
-                dto = try JSONDecoder().decode(PlanDTO.self, from: data)
+                let parsed = try AgentPlan.parse(data, duration: duration, meta: meta)
+                return (parsed, parsed.issues)
             } catch {
-                AppModel.log("AI polish: bad plan.json: \(error)")
-                throw DirectorError.unparseableOutput
+                AppModel.log("AI editor: bad plan.json: \(error.localizedDescription)")
+                return (nil, ["plan.json could not be read: \(error.localizedDescription)"])
             }
-            let cleaned = AIDirector.validate(dto, duration: duration, meta: meta)
-            guard !cleaned.isEmpty || dto.segments.isEmpty else { throw DirectorError.emptyPlan }
-            let tag = [provider.kind.rawValue, model, effort].compactMap { $0 }.joined(separator: " / ")
-            AppModel.log("AI polish (\(tag)): \(segments.count) → \(cleaned.count) segments")
-            return cleaned
         }
 
         // MARK: Commands
@@ -304,8 +369,9 @@ enum AIDirector {
                 sessionID = id
                 let session = resume ? "--resume \(id)" : "--session-id \(id)"
                 let effortFlag = effort.map { " --effort \($0)" } ?? ""
-                // acceptEdits: file writes inside the workspace cwd are auto-approved.
-                return "\(bin) -p \(session)\(modelFlag)\(effortFlag) --output-format stream-json --verbose --permission-mode acceptEdits < prompt.txt"
+                // acceptEdits: file writes inside the workspace cwd are auto-approved;
+                // the allow-list lets the agent run the ./crisp tools unprompted.
+                return "\(bin) -p \(session)\(modelFlag)\(effortFlag) --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools \"Read,Write,Edit,Bash(./crisp:*)\" < prompt.txt"
             case .codex:
                 let images = frames.map { "-i \"\($0.file)\"" }.joined(separator: " ")
                 let effortFlag = effort.map { " -c model_reasoning_effort=\\\"\($0)\\\"" } ?? ""
@@ -402,205 +468,56 @@ enum AIDirector {
         return line.count < command.count ? "\(line) …" : String(line)
     }
 
-    // MARK: - Context assembly
+    // MARK: - Prompts
 
-    fileprivate struct Frame {
-        var file: String
-        var t: Double
-        var label: String
-    }
-
-    /// A wide establishing frame plus one frame at each zoom's opening moment
-    /// (or at click times if there are no segments yet), capped at 8.
-    private static func extractFrames(
-        masterURL: URL, segments: [ZoomSegment], duration: Double, into workspace: URL
-    ) async throws -> [Frame] {
-        let asset = AVURLAsset(url: masterURL)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 1024, height: 1024)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.15, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.15, preferredTimescale: 600)
-
-        var wanted: [(Double, String)] = [(min(0.5, duration / 2), "wide establishing shot")]
-        for seg in segments.prefix(7) {
-            wanted.append((min(seg.start + 0.1, duration - 0.05), "at zoom starting \(String(format: "%.2f", seg.start))s"))
-        }
-
-        var frames: [Frame] = []
-        for (index, (t, label)) in wanted.enumerated() {
-            let time = CMTime(seconds: max(0, t), preferredTimescale: 600)
-            guard let cg = try? await generator.image(at: time).image else { continue }
-            let name = "frame_\(index).jpg"
-            let url = workspace.appendingPathComponent(name)
-            guard let dest = CGImageDestinationCreateWithURL(
-                url as CFURL, UTType.jpeg.identifier as CFString, 1, nil
-            ) else { continue }
-            CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.7] as CFDictionary)
-            CGImageDestinationFinalize(dest)
-            frames.append(Frame(file: name, t: t, label: label))
-        }
-        return frames
-    }
-
-    private static func buildContext(
-        meta: RecordingMeta, duration: Double, segments: [ZoomSegment], frames: [Frame]
-    ) throws -> Data {
-        var clicks: [[String: Double]] = []
-        for event in meta.events where event.kind == .leftDown || event.kind == .rightDown {
-            clicks.append(["t": round2(event.t), "x": round2(event.x), "y": round2(event.y)])
-        }
-        let plan = try JSONSerialization.jsonObject(with: encodePlan(segments))
-        let context: [String: Any] = [
-            "video": ["durationSeconds": round2(duration), "pixelWidth": meta.pixelWidth, "pixelHeight": meta.pixelHeight],
-            "clicks": clicks,
-            "currentPlan": plan,
-            "frames": frames.map { ["file": $0.file, "atSeconds": round2($0.t), "label": $0.label] },
-        ]
-        return try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys])
-    }
-
-    private static func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
-
-    /// The plan in the exact shape the agent is asked to write back.
-    private static func encodePlan(_ segments: [ZoomSegment]) throws -> Data {
-        let plan: [[String: Any]] = segments.map { seg in
-            [
-                "start": round2(seg.start), "end": round2(seg.end), "zoom": round2(seg.zoom),
-                "cx": round2(seg.cx), "cy": round2(seg.cy),
-                "pans": seg.pans.map { pan in
-                    var dto: [String: Any] = [
-                        "t": round2(pan.t), "duration": round2(pan.duration),
-                        "cx": round2(pan.cx), "cy": round2(pan.cy),
-                    ]
-                    if let zoom = pan.zoom { dto["zoom"] = round2(zoom) }
-                    return dto
-                },
-            ]
-        }
-        return try JSONSerialization.data(withJSONObject: ["segments": plan], options: [.sortedKeys])
-    }
-
-    private static let planShape =
-        #"{"segments":[{"start":0.0,"end":0.0,"zoom":1.8,"cx":0.0,"cy":0.0,"pans":[{"t":0.0,"duration":0.5,"cx":0.0,"cy":0.0,"zoom":2.2}]}]}"#
-
-    private static func firstPrompt(note: String, frames: [Frame], workspace: URL) -> String {
+    private static func firstPrompt(note: String, moment: String?, frames: [AgentPlan.Frame], workspace: URL) -> String {
         let frameList = frames
             .map { "- \(workspace.appendingPathComponent($0.file).path) — \($0.label)" }
             .joined(separator: "\n")
-        let userNote = note.trimmingCharacters(in: .whitespaces).isEmpty
-            ? "" : "\nDirector's note from the user (follow it): \(note)\n"
+        var userNote = note.trimmingCharacters(in: .whitespaces).isEmpty
+            ? "There is no note from the user this time: apply the default brief."
+            : "Director's note from the user — follow it, it outranks the default brief:\n\(note)"
+        if let moment { userNote += "\n\n\(moment)" }
         return """
-        You are a motion director polishing the automatic zoom plan of a screen recording. \
-        The automatic plan is decent but unpolished: zooms can start a beat late or early, \
-        there can be too many zooms or too many pans, and centers don't always frame the \
-        UI element being clicked. Your job is editorial touch-up, not re-authoring.
+        Polish the camera plan for this screen recording. Your full brief is AGENTS.md / \
+        CLAUDE.md in this directory (\(workspace.path)) — read it first if it hasn't been \
+        loaded for you. In short: context.json holds the video info, clicks, cursor path and \
+        the current plan; the annotated stills below show what was on screen; ./crisp gives \
+        you more frames, previews of your plan through the real camera, and a validator.
 
-        Read \(workspace.appendingPathComponent("context.json").path) for the video info, \
-        every click (t = seconds, x/y = pixels, top-left origin), and the current plan. \
-        Look at these frames from the actual video to understand what was on screen:
+        Frames (video pixels on the grid; green box = what the current plan shows):
         \(frameList)
 
-        Semantics: a segment is the fully-zoomed hold window [start, end] in seconds; the \
-        camera automatically begins moving ~0.7s before `start` and arrives just before it, \
-        and eases back out ~0.7s after `end`. So `start` should be at (or a hair before) the \
-        first click of the action it covers. A pan glides the zoomed camera to a new center \
-        (cx, cy) at time `t` over `duration` seconds, and must lie within its segment. A pan \
-        may also carry its own `zoom` to tighten (or loosen) the camera as it glides — use \
-        this to zoom in further on a small element mid-hold instead of zooming out and back \
-        in; omit `zoom` to keep the current level.
-
-        Polish goals, in priority order:
-        1. Timing: each zoom's hold should open on the click it serves — never noticeably late.
-        2. Fewer, better zooms: merge segments covering one continuous action; drop zooms on \
-        trivial or isolated clicks that don't deserve emphasis.
-        3. Fewer pans: only pan when the action genuinely leaves the framed area; drop jittery \
-        re-centers.
-        4. Framing: adjust cx/cy so the zoomed view frames the UI element being interacted \
-        with (use the frames), not just the raw click point. Keep zoom levels between 1.5 \
-        and 2.2 unless a tiny UI element justifies more.
-        5. Calm pacing: leave breathing room at full frame between zoom bursts.
         \(userNote)
-        \(workspace.appendingPathComponent("plan.json").path) currently holds the current plan. \
-        When you're done, overwrite it with your polished plan — a JSON object with exactly this shape:
-        \(planShape)
-        All times in seconds within the video duration; cx/cy in pixels within the video size. \
-        Segments sorted and non-overlapping. `pans` may be an empty array.
 
-        Then reply to the user in 2–4 plain sentences: what you changed and why. \
-        Don't paste the JSON into your reply. The user may send follow-up notes later; \
-        each time, apply them to the plan in context.json and rewrite plan.json.
+        Overwrite plan.json with your polished plan, run ./crisp validate until it prints OK, \
+        preview the moments you changed with ./crisp preview and adjust any level that shows \
+        too little or too much, then reply in 2–4 plain sentences about what you changed and why.
         """
     }
 
-    private static func followUpPrompt(note: String) -> String {
+    private static func followUpPrompt(note: String, moment: String?) -> String {
         """
         Director's note: \(note)
-
-        The current plan is in context.json in this directory (it may have been hand-edited \
-        since your last reply), and the frame_*.jpg stills have been re-extracted at each of \
-        its zoom openings. plan.json also holds the current plan. Apply the note by overwriting \
-        plan.json in the same shape as before (leave it untouched only if the note is already \
-        satisfied), and reply in 2–4 plain sentences describing what you changed.
+        \(moment.map { "\n\($0)\n" } ?? "")
+        context.json, plan.json and the frame_*.jpg stills have been refreshed to the user's \
+        current plan, which may have been hand-edited since your last reply — re-read \
+        context.json before changing anything. Apply the note on top of what is there: \
+        overwrite plan.json, run ./crisp validate until it prints OK, preview what you \
+        changed, and reply in 2–4 plain sentences. Leave plan.json untouched only if the note \
+        is already satisfied.
         """
     }
 
-    // MARK: - Parse & validate
+    private static func fixupPrompt(issues: [String]) -> String {
+        """
+        The app checked plan.json and would have to change it to fit its rules:
+        \(issues.map { "- \($0)" }.joined(separator: "\n"))
 
-    private struct PlanDTO: Decodable {
-        var segments: [SegDTO]
-        struct SegDTO: Decodable {
-            var start: Double
-            var end: Double
-            var zoom: Double?
-            var cx: Double
-            var cy: Double
-            var pans: [PanDTO]?
-        }
-        struct PanDTO: Decodable {
-            var t: Double
-            var duration: Double?
-            var cx: Double
-            var cy: Double
-            var zoom: Double?
-        }
-    }
-
-    /// Clamp everything into legal ranges; drop degenerate segments; enforce order.
-    private static func validate(_ dto: PlanDTO, duration: Double, meta: RecordingMeta) -> [ZoomSegment] {
-        let w = Double(meta.pixelWidth)
-        let h = Double(meta.pixelHeight)
-        var result: [ZoomSegment] = []
-
-        for seg in dto.segments.sorted(by: { $0.start < $1.start }) {
-            var start = min(max(0, seg.start), duration)
-            let end = min(max(0, seg.end), duration)
-            if let previous = result.last, start < previous.end + 0.2 {
-                start = previous.end + 0.2
-            }
-            guard end - start >= 0.3 else { continue }
-
-            let zoom = min(max(seg.zoom ?? 1.8, 1.2), 3.0)
-            var pans: [PanMove] = []
-            for pan in (seg.pans ?? []).sorted(by: { $0.t < $1.t }) {
-                let t = min(max(pan.t, start), end - 0.15)
-                guard t > start else { continue }
-                pans.append(PanMove(
-                    t: t,
-                    duration: min(max(pan.duration ?? 0.5, 0.15), 1.5),
-                    cx: min(max(pan.cx, 0), w),
-                    cy: min(max(pan.cy, 0), h),
-                    zoom: pan.zoom.map { min(max($0, 1.2), 3.0) }
-                ))
-            }
-            result.append(ZoomSegment(
-                start: start, end: end, zoom: zoom,
-                cx: min(max(seg.cx, 0), w),
-                cy: min(max(seg.cy, 0), h),
-                pans: pans
-            ))
-        }
-        return result
+        Fix these in plan.json yourself so nothing is clamped behind your back — ./crisp \
+        validate prints exactly these checks; run it until it prints OK. Then reply in one \
+        sentence saying what you adjusted.
+        """
     }
 
     // MARK: - Shell
@@ -741,8 +658,7 @@ enum AIDirector {
     enum DirectorError: LocalizedError {
         case cliFailed(String)
         case timedOut
-        case unparseableOutput
-        case noPlanWritten
+        case unparseableOutput(String)
         case emptyPlan
 
         var errorDescription: String? {
@@ -751,10 +667,8 @@ enum AIDirector {
                 return "The AI tool failed: \(detail)"
             case .timedOut:
                 return "The AI tool took too long and was stopped — your zooms are unchanged."
-            case .unparseableOutput:
-                return "The AI wrote an invalid plan.json (see ~/Library/Logs/Crisp.log)."
-            case .noPlanWritten:
-                return "The AI removed the plan file — your zooms are unchanged."
+            case .unparseableOutput(let detail):
+                return "The AI wrote an invalid plan.json (\(detail)) — your zooms are unchanged."
             case .emptyPlan:
                 return "The AI returned an empty plan — kept your current zooms."
             }

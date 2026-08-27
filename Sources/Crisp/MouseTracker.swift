@@ -93,7 +93,67 @@ final class MouseTracker {
     private func sampleCursor() {
         refreshWindowBoundsIfDue()
         guard let t = relativeNow(), let p = currentCursorPixel() else { return }
-        samples.append(CursorSample(t: t, x: p.x, y: p.y))
+        let kind = Self.classify()
+        samples.append(CursorSample(t: t, x: p.x, y: p.y, kind: kind == .arrow ? nil : kind))
+    }
+
+    // MARK: - Cursor kind
+
+    /// Size + hotspot of the last classified system cursor. Cheap to read, and
+    /// the three stock kinds we care about don't share a signature.
+    private struct CursorSignature: Equatable {
+        var size: CGSize
+        var hotSpot: CGPoint
+    }
+
+    private static var stockTIFFs: [(Data, CursorKind)]?
+    private static var lastSignature: CursorSignature?
+    private static var lastKind: CursorKind = .arrow
+
+    /// Arrow / pointing hand / I-beam from the live system cursor. Signature
+    /// first (size + hotspot); TIFF of the smallest rep only when it changes.
+    private static func classify() -> CursorKind {
+        guard let cursor = NSCursor.currentSystem else { return .arrow }
+        let signature = CursorSignature(size: cursor.image.size, hotSpot: cursor.hotSpot)
+        if signature == lastSignature { return lastKind }
+        lastSignature = signature
+        lastKind = match(cursor)
+        return lastKind
+    }
+
+    private static func match(_ cursor: NSCursor) -> CursorKind {
+        ensureStockTIFFs()
+        guard let tiff = smallestTIFF(cursor.image),
+              let hit = stockTIFFs?.first(where: { $0.0 == tiff }) else { return .arrow }
+        return hit.1
+    }
+
+    /// Stock cursor images are empty 0×0 in a process without an NSApplication
+    /// connection (only pointingHand loads standalone). Compute on first use.
+    private static func ensureStockTIFFs() {
+        guard stockTIFFs == nil else { return }
+        var pairs: [(Data, CursorKind)] = []
+        if let d = smallestTIFF(NSCursor.arrow.image) { pairs.append((d, .arrow)) }
+        if let d = smallestTIFF(NSCursor.pointingHand.image) { pairs.append((d, .pointer)) }
+        if let d = smallestTIFF(NSCursor.iBeam.image) { pairs.append((d, .iBeam)) }
+        stockTIFFs = pairs
+    }
+
+    private static func smallestTIFF(_ image: NSImage) -> Data? {
+        guard image.size.width >= 1, image.size.height >= 1 else { return nil }
+        let bitmaps = image.representations.compactMap { $0 as? NSBitmapImageRep }
+        let smallest = bitmaps.min {
+            pixelCount($0) < pixelCount($1)
+        }
+        guard let tiff = smallest?.tiffRepresentation ?? image.tiffRepresentation,
+              !tiff.isEmpty else { return nil }
+        return tiff
+    }
+
+    private static func pixelCount(_ rep: NSBitmapImageRep) -> Int {
+        let w = rep.pixelsWide > 0 ? rep.pixelsWide : Int(rep.size.width)
+        let h = rep.pixelsHigh > 0 ? rep.pixelsHigh : Int(rep.size.height)
+        return max(0, w) * max(0, h)
     }
 
     /// Window captures follow the window wherever it goes; re-read its frame a

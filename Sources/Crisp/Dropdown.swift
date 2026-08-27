@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 // The dropdown subsystem (Figma 29:4731): the menu card, the trigger button,
 // and the per-window host that positions and dismisses the open menu. Split
@@ -40,7 +39,7 @@ struct DropdownPlaceholder {
 /// Shown by `DropdownButton` through the nearest `.dropdownHost()`.
 struct DropdownMenu: View {
     let items: [DropdownItem]
-    var minWidth: CGFloat = 149
+    private let minWidth: CGFloat = 149
     /// Drawn above the rows (e.g. a `TabsPicker` switching between lists).
     var header: AnyView? = nil
     /// Shown instead of rows when there is nothing to list.

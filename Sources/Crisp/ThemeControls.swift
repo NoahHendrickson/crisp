@@ -4,45 +4,6 @@ import AppKit
 /// Control styles mirrored from noey-ui (button.tsx, tabs.tsx, select.tsx,
 /// progress.tsx) and the Crisp v1 Figma (43:5307). Tokens live in Theme.swift.
 
-// MARK: - Gloss (shadow-button-gloss / shadow-gloss-sm)
-
-extension ShapeStyle {
-    /// The library's "Button/Primary gloss" (or "Gloss/Small" for tabs):
-    /// cool inset highlight from the top, cyan inset glow from the bottom.
-    /// CSS blur radius ≈ 2× the SwiftUI shadow radius. Pair with
-    /// `glossRing` for the 2px inner highlight.
-    func glossed(small: Bool = false) -> some ShapeStyle {
-        self
-            .shadow(.inner(color: Theme.glossTop, radius: small ? 2 : 4, x: 0, y: small ? 1 : 2))
-            .shadow(.inner(color: Theme.glossBottom, radius: small ? 1.5 : 3, x: 0, y: small ? -1 : -2))
-    }
-}
-
-extension InsettableShape {
-    /// The gloss highlight ring (spec says 2px spread; 1px reads correctly on screen).
-    func glossRing(width: CGFloat = 1, insideBorder border: CGFloat = 1) -> some View {
-        inset(by: border)
-            .strokeBorder(Theme.glossHighlight, lineWidth: width)
-            .allowsHitTesting(false)
-    }
-}
-
-/// The blue "glossed pill": fill, inset gloss, 1px border and the gloss
-/// highlight ring. Only the editor timeline's hold bar still uses it.
-struct PrimaryChrome<S: InsettableShape>: View {
-    let shape: S
-    var fill: Color = Theme.primary
-    var border: Color = Theme.primaryBorder
-    var small = false
-
-    var body: some View {
-        shape.fill(fill)
-            .overlay(shape.inset(by: 1).fill(fill.glossed(small: small)))
-            .overlay(shape.strokeBorder(border, lineWidth: 1))
-            .overlay(shape.glossRing())
-    }
-}
-
 // MARK: - Raised surface (--shadow-raised)
 
 extension View {
@@ -70,48 +31,79 @@ struct RaisedChrome<S: InsettableShape>: View {
 // MARK: - Pointer cursor
 
 /// Shows the pointing-hand cursor over a clickable control. Disabled views
-/// keep the arrow. Uses AppKit cursor rects so the cursor resets when the
-/// mouse leaves, even if SwiftUI hover gets out of sync.
+/// keep the arrow.
+///
+/// Driven by SwiftUI hover rather than AppKit cursor rects: a cursor-rect
+/// view under SwiftUI content never receives cursor-update events (the
+/// hosting view hit-tests everything itself), so rects silently do nothing.
+/// Every hovered control registers with `PointerCursor`, which sets the
+/// hand while any control is hovered and puts the arrow back when none is
+/// — so nested clickables, controls that vanish mid-hover and disabled
+/// states can't strand the cursor. The hand is re-asserted on each mouse
+/// move because the hosting view resets to the arrow on its own.
 extension View {
     func pointingHandCursor() -> some View {
         modifier(PointingHandCursorModifier())
     }
 }
 
+/// The set of controls currently under the pointer.
+@MainActor
+enum PointerCursor {
+    private static var hovered = Set<UUID>()
+
+    static func enter(_ id: UUID) {
+        hovered.insert(id)
+        if NSCursor.current != NSCursor.pointingHand { NSCursor.pointingHand.set() }
+    }
+
+    static func reassert(_ id: UUID) {
+        guard hovered.contains(id), NSCursor.current != NSCursor.pointingHand else { return }
+        NSCursor.pointingHand.set()
+    }
+
+    static func exit(_ id: UUID) {
+        guard hovered.remove(id) != nil, hovered.isEmpty else { return }
+        NSCursor.arrow.set()
+    }
+}
+
 private struct PointingHandCursorModifier: ViewModifier {
     @Environment(\.isEnabled) private var isEnabled
+    @State private var id = UUID()
+    @State private var inside = false
 
     func body(content: Content) -> some View {
-        content.background {
-            if isEnabled { PointingHandCursorView() }
-        }
+        content
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    guard isEnabled else { return }
+                    if inside {
+                        PointerCursor.reassert(id)
+                    } else {
+                        inside = true
+                        PointerCursor.enter(id)
+                    }
+                case .ended:
+                    guard inside else { return }
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
+            .onChange(of: isEnabled) { _, enabled in
+                if !enabled, inside {
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
+            .onDisappear {
+                if inside {
+                    inside = false
+                    PointerCursor.exit(id)
+                }
+            }
     }
-}
-
-private struct PointingHandCursorView: NSViewRepresentable {
-    func makeNSView(context: Context) -> PointingHandCursorNSView {
-        PointingHandCursorNSView()
-    }
-
-    func updateNSView(_ view: PointingHandCursorNSView, context: Context) {}
-}
-
-private final class PointingHandCursorNSView: NSView {
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Buttons (button.tsx variants + sizes)
@@ -143,7 +135,7 @@ enum ControlSizeToken {
 }
 
 enum ButtonVariant {
-    case primary, outline, secondary, ghost, destructive, link
+    case primary, outline, secondary, ghost, link
 }
 
 struct ThemedButtonStyle: ButtonStyle {
@@ -201,7 +193,6 @@ struct ThemedButtonStyle: ButtonStyle {
             case .outline: return hovering ? Theme.outlineHover : .clear
             case .secondary: return hovering ? Theme.secondaryHover : Theme.secondary
             case .ghost: return hovering ? Theme.muted : .clear
-            case .destructive: return Theme.destructive.opacity(hovering ? 0.2 : 0.1)
             case .link: return .clear
             }
         }
@@ -210,7 +201,6 @@ struct ThemedButtonStyle: ButtonStyle {
             switch style.variant {
             case .primary: return style.tint == nil ? Theme.background : Theme.primaryForeground
             case .outline, .ghost, .secondary: return Theme.foreground
-            case .destructive: return Theme.destructive
             case .link: return Theme.primary
             }
         }
@@ -435,32 +425,6 @@ struct SelectTriggerLabel: View {
     }
 }
 
-// MARK: - Card / GroupBox
-
-struct CardGroupBoxStyle: GroupBoxStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            configuration.label
-                .font(Theme.font(.label12))
-                .foregroundStyle(Theme.foreground)
-            configuration.content
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Theme.border, lineWidth: 1)
-        )
-    }
-}
-
-extension GroupBoxStyle where Self == CardGroupBoxStyle {
-    static var card: CardGroupBoxStyle { CardGroupBoxStyle() }
-}
-
 // MARK: - Progress (progress.tsx + Figma 43:5350)
 
 /// 8pt pill track with a 1px border; the indicator is the raised surface
@@ -486,45 +450,6 @@ struct ThemedProgress: View {
         }
         .frame(height: 8)
         .accessibilityValue("\(Int((min(max(fraction, 0), 1)) * 100)) percent")
-    }
-}
-
-/// Slider whose track is `ThemedProgress` (8pt, 2pt corners, primary gloss).
-struct ThemedSlider: View {
-    @Binding var value: Double
-    var range: ClosedRange<Double>
-
-    init(value: Binding<Double>, in range: ClosedRange<Double>) {
-        self._value = value
-        self.range = range
-    }
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = max(geo.size.width, 1)
-            let span = range.upperBound - range.lowerBound
-            let t = span > 0 ? (value - range.lowerBound) / span : 0
-            let clamped = min(max(t, 0), 1)
-            ZStack(alignment: .leading) {
-                ThemedProgress(fraction: clamped)
-                Circle()
-                    .fill(Theme.background)
-                    .overlay(Circle().strokeBorder(Theme.foreground, lineWidth: 1))
-                    .frame(width: 12, height: 12)
-                    .offset(x: CGFloat(clamped) * (w - 12))
-            }
-            .frame(width: w, height: 16)
-            .contentShape(Rectangle())
-            .pointingHandCursor()
-            .gesture(
-                DragGesture(minimumDistance: 0).onChanged { g in
-                    let p = min(max(g.location.x / w, 0), 1)
-                    value = range.lowerBound + p * span
-                }
-            )
-        }
-        .frame(height: 16)
-        .accessibilityValue(Text(String(format: "%.2f", value)))
     }
 }
 
@@ -559,26 +484,3 @@ struct ExportProgressControls: View {
     }
 }
 
-// MARK: - Hatch
-
-/// Diagonal stripes used on the timeline to mark automatic (non-editable)
-/// camera phases. Draws over the view's frame; clip to shape as needed.
-struct Hatch: View {
-    var color: Color
-    var spacing: CGFloat = 7
-    var lineWidth: CGFloat = 2
-
-    var body: some View {
-        Canvas { ctx, size in
-            var path = Path()
-            let span = size.width + size.height
-            var offset: CGFloat = -size.height
-            while offset < span {
-                path.move(to: CGPoint(x: offset, y: size.height))
-                path.addLine(to: CGPoint(x: offset + size.height, y: 0))
-                offset += spacing
-            }
-            ctx.stroke(path, with: .color(color), lineWidth: lineWidth)
-        }
-    }
-}

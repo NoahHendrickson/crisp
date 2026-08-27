@@ -6,8 +6,8 @@ import CoreText
 /// Figma (node 61:9313). Monochrome "ink / paper" system: light mode is ink
 /// on paper, dark mode is paper on ink. Borders use the solid `--border`
 /// swatch; secondary fills and tracks are foreground alphas so they follow
-/// the mode on their own. The sky-blue `primary` survives only as the
-/// editor's zoom accent.
+/// the mode on their own. The sky-blue `primary` survives as the editor's
+/// crop box and zoom bars and the dropdown check.
 /// Control styles live in ThemeControls.swift.
 enum Theme {
     // MARK: - Colors (light / dark)
@@ -24,29 +24,31 @@ enum Theme {
     static let secondary = dynamic("#23201e1f", "#f8f7eb1f")     // bg-foreground/12
     static let secondaryHover = dynamic("#23201e29", "#f8f7eb29") // bg-foreground/16
     static let outlineHover = dynamic("#23201e0d", "#f8f7eb0d")  // bg-foreground/5
-    static let ring = dynamic("#a1a1a1", "#737373")
     /// Text-selection band (Figma 76:13676): sky blue at 30%.
     static let selection = Color(red: 57 / 255, green: 147 / 255, blue: 244 / 255).opacity(0.3)
     static let destructive = dynamic("#e7000b", "#ff6467")
     static let success = dynamic("#15803d", "#4ade80")
-    /// Brand green (`--secondary`, Figma 75:11919): the zoom / pan count tag.
+    /// Brand green (`--secondary`, Figma 75:11919): the zoom / step count tag.
     static let brand = dynamic("#359e70", "#4ade80")
     /// `secondary/_states/selected` — brand green at 8% (16% on ink).
     static let brandSelected = dynamic("#007e4814", "#4ade8029")
-    /// Editor timeline (Figma 76:13691): black@12 track; the selected zoom
-    /// bar is `secondary/light` with a `secondary/outlinedBorder` hairline,
-    /// the rest sit at `secondary/focusVisible` (30%).
+    /// Editor timeline (Figma 93:1015): a black@12 track; the video row is
+    /// `secondary/light`, zoom holds are blue, pinned stretches orange, all
+    /// with a white@50 hairline; ruler ticks black@24.
     static let timelineTrack = dynamic("#0000001f", "#ffffff1f")
-    static let zoomBar = dynamic("#33c27b", "#4ade80")
-    static let zoomBarBorder = dynamic("#007e4880", "#4ade8080")
-    static let zoomBarMuted = dynamic("#007e484d", "#4ade804d")
-    /// Icon/label color on the selected (solid green) zoom bar.
-    static let zoomBarForeground = dynamic("#f8f7eb", "#23201e")
+    static let videoBar = dynamic("#33c27b", "#4ade80")
+    static let zoomBar = dynamic("#47a6ff", "#47a6ff")
+    static let pinBar = dynamic("#ff9a42", "#ff9a42")
+    static let pinBarBorder = dynamic("#ffe19a", "#ffe19a")
+    static let barBorder = Color.white.opacity(0.5)
+    static let ruler = dynamic("#0000003d", "#ffffff3d")
+    /// Value wells in the toolbar's Zoom / Pin groups (Figma 93:745):
+    /// paper with a foreground@24 hairline.
+    static let fieldBorder = dynamic("#23201e3d", "#f8f7eb3d")
     /// Record button (Figma 43:5324) — the one saturated control.
     static let record = Color(hex: "#ff2d57")
 
-    // Raised surface: tabs track / active tab and the progress track /
-    // indicator (tabs.tsx, progress.tsx). Light: muted + background; dark:
+    // Raised surface: the progress track / indicator (progress.tsx). Light: muted + background; dark:
     // white @12 / @16 with white @8 / @24 borders.
     static let track = dynamic("#23201e14", "#ffffff1f")
     static let trackBorder = dynamic("#23201e14", "#ffffff14")
@@ -70,10 +72,6 @@ enum Theme {
     static let primaryBorder = Color(hex: "#0d95ef")
     /// Label color on tinted (record / primary-blue) fills.
     static let primaryForeground = Color(hex: "#f8f7eb")
-
-    static let glossHighlight = Color.white.opacity(0.25)
-    static let glossTop = Color(hex: "#d3e5fc").opacity(0.24)
-    static let glossBottom = Color(hex: "#6fffff").opacity(0.5)
 
     static let radiusSm: CGFloat = 6   // select trigger, tags
     static let radiusMd: CGFloat = 8   // buttons, tabs, thumbnails, panels

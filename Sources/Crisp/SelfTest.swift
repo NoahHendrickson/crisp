@@ -30,8 +30,11 @@ enum SelfTest {
     }
 
     static func run() async throws {
+        // The folder name carries every shell metacharacter a recording name
+        // can (only "/" and ":" are refused), so the agent's `./crisp` wrapper
+        // is exercised against a hostile path.
         let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("crisp-selftest-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            .appendingPathComponent("crisp-selftest-\(ProcessInfo.processInfo.processIdentifier) it's \"$(echo pwned)\" `x`", isDirectory: true)
         try? FileManager.default.removeItem(at: folder)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let keep = ProcessInfo.processInfo.environment["CRISP_SELFTEST_KEEP"] == "1"
@@ -42,6 +45,11 @@ enum SelfTest {
                 try? FileManager.default.removeItem(at: folder)
             }
         }
+
+        try checkCursorKind()
+        try checkCursorStyle()
+        try checkHoldRoom()
+        print("selftest: cursor kind decode + hold ok")
 
         let recording = Recording(folder: folder)
         let width = 1280
@@ -56,6 +64,13 @@ enum SelfTest {
         try writeSyntheticEvents(
             to: recording.eventsURL, width: width, height: height, duration: duration
         )
+        do {
+            let meta = try recording.loadMeta()
+            guard meta.samples.contains(where: { $0.kind == .pointer }),
+                  meta.samples.contains(where: { $0.kind == nil }) else {
+                throw SelfTestError.cursor("synthetic events missing pointer span or arrow ticks")
+            }
+        }
 
         print("selftest: master written, exporting with zooms...")
         let renderer = Renderer()
@@ -84,11 +99,8 @@ enum SelfTest {
 
         // Second pass: export again through an edited plan.json (the editor path).
         recording.savePlan([
-            ZoomSegment(
-                start: 0.4, end: 1.4, zoom: 2.2, cx: 300, cy: 380,
-                pans: [PanMove(t: 0.8, duration: 0.4, cx: 900, cy: 300)]
-            )
-        ])
+            ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
+        ], cursorStyle: .bubbly)
         // Re-exporting (as MP4/H.264) must not overwrite the first export: it
         // should land in a numbered sibling file.
         let planURL = try await Renderer().export(recording: recording, format: .mp4H264) { _ in }
@@ -97,11 +109,11 @@ enum SelfTest {
               recording.exportURLs == [exportURL, planURL] else {
             throw SelfTestError.badExportName(planURL.lastPathComponent)
         }
-        // Each export carries a snapshot of the plan that produced it.
-        guard Recording.loadPlanSegments(from: Recording.planSnapshotURL(for: planURL))?.count == 1,
-              recording.files.map(\.title) == ["Original", "Export", "Export 2"],
-              recording.files.last?.zoomCount == 1 else {
-            throw SelfTestError.badExportName("missing plan snapshot for \(planURL.lastPathComponent)")
+        // Each export carries a snapshot of the plan that produced it,
+        // cursor style included.
+        let snapshot = Recording.loadPlan(from: Recording.planSnapshotURL(for: planURL))
+        guard snapshot?.segments.count == 1, snapshot?.cursorStyle == .bubbly else {
+            throw SelfTestError.badExportName("missing or incomplete plan snapshot for \(planURL.lastPathComponent)")
         }
         let planAsset = AVURLAsset(url: planURL)
         let planDuration = try await planAsset.load(.duration).seconds
@@ -124,9 +136,16 @@ enum SelfTest {
         print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
 
         try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
+
+        try checkStaleChildren(meta: try recording.loadMeta())
+        try checkCrowdedSteps(meta: try recording.loadMeta())
+        try checkOverlappingZooms(meta: try recording.loadMeta())
         print("selftest: compare diff + stacked composer ok")
 
-        // Optional online leg: exercise the real AI-polish loop (spends a small
+        try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
+        print("selftest: agent tools ok — validation, annotated frames, preview render, briefing")
+
+        // Optional online leg: exercise the real AI editor loop (spends a small
         // amount of the user's agent-CLI quota, so only on request).
         if ProcessInfo.processInfo.environment["CRISP_AI_SELFTEST"] == "1" {
             let providers = await AIDirector.detectProviders()
@@ -138,7 +157,7 @@ enum SelfTest {
             let model = ProcessInfo.processInfo.environment["CRISP_AI_MODEL"]
             let effort = ProcessInfo.processInfo.environment["CRISP_AI_EFFORT"]
             let tag = [model, effort].compactMap { $0 }.joined(separator: ", ")
-            print("selftest: AI polish via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
+            print("selftest: AI editor via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
             let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
@@ -156,23 +175,137 @@ enum SelfTest {
                 case .text(let t): print("selftest:   \(t.prefix(200))")
                 }
             }
-            let polished = try await session.send(
+            let outcome = try await session.send(
                 note: "test run — keep it minimal", segments: auto, onEvent: report
             )
-            print("selftest: AI polish ok — \(auto.count) → \(polished.count) segments")
+            let polished = outcome.plan
+            print("selftest: AI editor ok — \(auto.count) → \(polished.count) segments; adjustments: \(outcome.adjustments)")
             for seg in polished {
-                print(String(format: "  zoom %.2f–%.2fs @%.1fx center(%.0f,%.0f) pans:%d",
-                             seg.start, seg.end, seg.zoom, seg.cx, seg.cy, seg.pans.count))
+                print(String(format: "  zoom %.2f–%.2fs @%.1fx steps:%d", seg.start, seg.end, seg.zoom, seg.steps.count))
             }
             // Second turn must resume the same provider session and honor the note.
             print("selftest: AI follow-up turn…")
             let followUp = try await session.send(
-                note: "drop every pan and keep at most one zoom", segments: polished, onEvent: report
-            )
-            let pans = followUp.reduce(0) { $0 + $1.pans.count }
+                note: "drop every step and keep at most one zoom", segments: polished, onEvent: report
+            ).plan
+            let steps = followUp.reduce(0) { $0 + $1.steps.count }
             guard !restarted else { throw SelfTestError.aiResumeFailed }
-            guard followUp.count <= 1, pans == 0 else { throw SelfTestError.aiIgnoredNote(segments: followUp.count, pans: pans) }
-            print("selftest: AI follow-up ok — \(polished.count) → \(followUp.count) segments, pans: \(pans), resumed")
+            guard followUp.count <= 1, steps == 0 else { throw SelfTestError.aiIgnoredNote(segments: followUp.count, steps: steps) }
+            print("selftest: AI follow-up ok — \(polished.count) → \(followUp.count) segments, steps: \(steps), resumed")
+        }
+    }
+
+    /// The offline half of the AI editor: a plan with deliberate rule breaks must
+    /// come back normalised with one message per break and its ids intact;
+    /// the annotated stills, a preview through the real compositor and the
+    /// workspace briefing must all be written.
+    private static func checkAgentTools(recording: Recording, meta: RecordingMeta, duration: Double) async throws {
+        let keepID = UUID()
+        let stepID = UUID()
+        let plan = """
+        {"segments": [
+          {"id": "\(keepID.uuidString)", "start": 0.20, "end": 1.20, "zoom": 3.8,
+           "zoomIn": 1.50, "zoomOut": 0.05,
+           "steps": [{"id": "\(stepID.uuidString)", "t": 0.60, "zoom": 5.0},
+                     {"t": 0.10, "zoom": 2.0}, {"t": 1.15, "zoom": 2.0}]},
+          {"start": 1.25, "end": 1.40, "zoom": 1.8, "steps": []},
+          {"start": 1.30, "end": 5.00, "pins": [{"x": 9000, "y": 100}]}
+        ]}
+        """
+        let parsed = try AgentPlan.parse(Data(plan.utf8), duration: duration, meta: meta)
+        guard parsed.declared == 3 else { throw SelfTestError.agentTools("declared \(parsed.declared)") }
+        guard parsed.segments.first?.id == keepID, parsed.segments.first?.steps.contains(where: { $0.id == stepID }) == true else {
+            throw SelfTestError.agentTools("ids not preserved")
+        }
+        guard parsed.segments[0].zoom == 3.0, parsed.segments[0].steps.first(where: { $0.id == stepID })?.zoom == 3.0 else {
+            throw SelfTestError.agentTools("zoom not clamped")
+        }
+        // The early step pulled to the hold start; the late one dropped.
+        guard let first = parsed.segments.first, first.steps.count == 2,
+              first.steps.contains(where: { $0.t == 0.2 }) else {
+            throw SelfTestError.agentTools("steps not normalised: \(parsed.segments.first?.steps ?? [])")
+        }
+        // Too-short zoom dropped, overlapping zoom pushed after it, end clamped to the video.
+        guard parsed.segments.count == 2, parsed.segments[1].start >= parsed.segments[0].end + 0.2,
+              parsed.segments[1].end <= duration else {
+            throw SelfTestError.agentTools("ordering not enforced: \(parsed.segments.map { ($0.start, $0.end) })")
+        }
+        guard parsed.segments.last?.pins.first?.point == CGPoint(x: Double(meta.pixelWidth), y: 100) else {
+            throw SelfTestError.agentTools("pin not kept/clamped: \(String(describing: parsed.segments.last?.pins))")
+        }
+        guard parsed.segments.first?.zoomIn == 1.5, parsed.segments.first?.zoomOut == 0.1 else {
+            throw SelfTestError.agentTools("ease lengths not kept/clamped: \(String(describing: parsed.segments.first?.zoomIn)) / \(String(describing: parsed.segments.first?.zoomOut))")
+        }
+        let expectedIssues = ["outside 1.2–3.0", "begins before the hold opens", "begins after the hold ends",
+                              "shorter than 0.30s", "starts before the previous zoom", "is outside the video",
+                              "pin (", "zoomOut"]
+        for needle in expectedIssues where !parsed.issues.contains(where: { $0.contains(needle) }) {
+            throw SelfTestError.agentTools("no issue mentioning '\(needle)' in \(parsed.issues)")
+        }
+        do {
+            _ = try AgentPlan.parse(Data("{\"segments\": [{\"start\": 1}]}".utf8), duration: duration, meta: meta)
+            throw SelfTestError.agentTools("malformed plan accepted")
+        } catch AgentPlan.ParseError.invalid(let detail) {
+            guard detail.contains("end") else { throw SelfTestError.agentTools("decode message unhelpful: \(detail)") }
+        }
+
+        let workspace = recording.folder.appendingPathComponent("agent-workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try AgentTools.installWorkspace(in: workspace, recording: recording)
+        for name in ["CLAUDE.md", "AGENTS.md", "crisp"] where !FileManager.default.isReadableFile(atPath: workspace.appendingPathComponent(name).path) {
+            throw SelfTestError.agentTools("briefing file \(name) missing")
+        }
+        guard FileManager.default.isExecutableFile(atPath: workspace.appendingPathComponent("crisp").path) else {
+            throw SelfTestError.agentTools("./crisp not executable")
+        }
+        // Run the wrapper for real: it re-enters this binary with the
+        // recording's metacharacter-laden path, which must arrive intact.
+        let crisp = Process()
+        crisp.executableURL = workspace.appendingPathComponent("crisp")
+        crisp.arguments = ["validate"]
+        crisp.currentDirectoryURL = workspace
+        let pipe = Pipe()
+        crisp.standardOutput = pipe
+        crisp.standardError = pipe
+        try crisp.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        crisp.waitUntilExit()
+        guard crisp.terminationStatus == 0, output.contains("OK —") else {
+            throw SelfTestError.agentTools("./crisp validate failed (exit \(crisp.terminationStatus)): \(output.suffix(300))")
+        }
+        let frames = try await AgentTools.extractFrames(
+            recording: recording, meta: meta, segments: parsed.segments, duration: duration, into: workspace
+        )
+        guard frames.count >= 2 else { throw SelfTestError.agentTools("only \(frames.count) frames") }
+        for frame in frames {
+            let size = (try? workspace.appendingPathComponent(frame.file).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size > 10_000 else { throw SelfTestError.agentTools("frame \(frame.file) is \(size) bytes") }
+        }
+        // A later turn's (smaller) set of stills replaces the earlier one;
+        // the agent's own frame_tNN.NN.jpg stays.
+        let own = workspace.appendingPathComponent("frame_t00.50.jpg")
+        try Data("not a jpeg".utf8).write(to: own)
+        let later = try await AgentTools.extractFrames(
+            recording: recording, meta: meta, segments: [], duration: duration, into: workspace
+        )
+        let stills = ((try? FileManager.default.contentsOfDirectory(atPath: workspace.path)) ?? [])
+            .filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }.sorted()
+        guard stills == (later.map(\.file) + ["frame_t00.50.jpg"]).sorted() else {
+            throw SelfTestError.agentTools("stale stills left behind: \(stills) vs \(later.map(\.file))")
+        }
+        try FileManager.default.removeItem(at: own)
+        let previewURL = workspace.appendingPathComponent("preview.jpg")
+        let camera = try await AgentTools.renderPreview(
+            recording: recording, meta: meta, segments: parsed.segments, duration: duration,
+            cursorStyle: .classic, at: 0.7, to: previewURL
+        )
+        guard camera.zoom > 1.5 else { throw SelfTestError.agentTools("preview camera not zoomed: \(camera.zoom)") }
+        let previewSize = (try? previewURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard previewSize > 10_000 else { throw SelfTestError.agentTools("preview is \(previewSize) bytes") }
+        let context = try AgentPlan.encodeContext(meta: meta, duration: duration, segments: parsed.segments, frames: frames)
+        guard let obj = try JSONSerialization.jsonObject(with: context) as? [String: Any],
+              obj["clickClusters"] != nil, obj["currentPlanTiming"] != nil, obj["cursorPath"] != nil else {
+            throw SelfTestError.agentTools("context.json missing sections")
         }
     }
 
@@ -259,12 +392,14 @@ enum SelfTest {
             MouseEvent(t: 1.4, kind: .leftDown, x: 900, y: 200),
             MouseEvent(t: 1.5, kind: .leftUp, x: 900, y: 200),
         ]
-        // Cursor drifts across the frame.
+        // Cursor drifts across the frame; a middle span is a pointer so export
+        // actually draws the hand (smoke, not pixel-diff).
         let samples = stride(from: 0.0, through: duration, by: 1.0 / 60.0).map { t in
             CursorSample(
                 t: t,
                 x: 200 + (t / duration) * 800,
-                y: 350 + (t / duration) * -140
+                y: 350 + (t / duration) * -140,
+                kind: (t >= 0.6 && t < 1.2) ? .pointer : nil
             )
         }
         let meta = RecordingMeta(
@@ -284,6 +419,155 @@ enum SelfTest {
         try encoder.encode(meta).write(to: url)
     }
 
+    /// Decode-without-kind stays arrow; kind is held (not interpolated) across a gap.
+    private static func checkCursorKind() throws {
+        let decoded = try JSONDecoder().decode(
+            CursorSample.self, from: Data(#"{"t":1,"x":10,"y":20}"#.utf8)
+        )
+        guard decoded.kind == nil else {
+            throw SelfTestError.cursor("missing kind decoded as \(String(describing: decoded.kind))")
+        }
+        guard let fromMissing = FrameComposer.cursorPosition(samples: [decoded], at: 1),
+              fromMissing.kind == .arrow else {
+            throw SelfTestError.cursor("missing kind did not resolve to arrow")
+        }
+
+        let arrowJSON = try JSONEncoder().encode(CursorSample(t: 1, x: 2, y: 3))
+        let arrowObj = try JSONSerialization.jsonObject(with: arrowJSON) as? [String: Any]
+        guard arrowObj?["kind"] == nil else {
+            throw SelfTestError.cursor("arrow sample encoded a kind field")
+        }
+
+        let samples = [
+            CursorSample(t: 0, x: 0, y: 0, kind: .pointer),
+            CursorSample(t: 1, x: 100, y: 0),
+        ]
+        guard let mid = FrameComposer.cursorPosition(samples: samples, at: 0.4),
+              mid.kind == .pointer, abs(mid.x - 40) < 0.01 else {
+            throw SelfTestError.cursor("kind not held across interpolated gap (got \(String(describing: FrameComposer.cursorPosition(samples: samples, at: 0.4))))")
+        }
+        guard let after = FrameComposer.cursorPosition(samples: samples, at: 1),
+              after.kind == .arrow else {
+            throw SelfTestError.cursor("kind at last sample was not arrow")
+        }
+    }
+
+    /// Plans without a cursor style decode as classic and encode without the
+    /// key; every style draws all three cursor kinds.
+    private static func checkCursorStyle() throws {
+        let legacy = try JSONDecoder().decode(ZoomPlan.self, from: Data(#"{"version":1,"segments":[]}"#.utf8))
+        guard legacy.cursorStyle == nil else {
+            throw SelfTestError.cursor("legacy plan decoded a cursor style")
+        }
+        let classic = try JSONEncoder().encode(ZoomPlan(segments: []))
+        let classicObj = try JSONSerialization.jsonObject(with: classic) as? [String: Any]
+        guard classicObj?["cursorStyle"] == nil else {
+            throw SelfTestError.cursor("classic plan encoded a cursorStyle field")
+        }
+        let bubbly = try JSONEncoder().encode(ZoomPlan(segments: [], cursorStyle: .bubbly))
+        guard try JSONDecoder().decode(ZoomPlan.self, from: bubbly).cursorStyle == .bubbly else {
+            throw SelfTestError.cursor("bubbly cursor style did not round-trip")
+        }
+        for style in CursorStyle.allCases {
+            let kinds = FrameComposer.cursorKinds(drawnBy: style)
+            guard kinds == Set([.arrow, .pointer, .iBeam]) else {
+                throw SelfTestError.cursor("\(style) draws \(kinds), not every cursor kind")
+            }
+        }
+    }
+
+    /// A step or pin left past a hold's end (the zoom was shortened under
+    /// it) must not leak into the camera: the hold keeps its own level and
+    /// the zoom-out is framed as if the pin weren't there.
+    private static func checkStaleChildren(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 3.0
+        let clean = ZoomSegment(start: 0.4, end: 1.0, zoom: 1.5)
+        var stale = clean
+        stale.steps = [ZoomStep(t: 1.5, zoom: 3.0)]
+        stale.pins = [PinWindow(x: 100, y: 100, from: 1.5)]
+        guard planner.holdSteps(for: stale, duration: duration).isEmpty,
+              planner.pinWindows(for: stale, duration: duration).isEmpty else {
+            throw SelfTestError.compare("a step or pin past the hold end still has a window")
+        }
+        let staleKeys = planner.keyframes(from: [stale], duration: duration)
+        let cleanKeys = planner.keyframes(from: [clean], duration: duration)
+        for t in stride(from: 0.0, through: duration, by: 0.1) {
+            let a = ZoomPlanner.evaluate(staleKeys, at: t)
+            let b = ZoomPlanner.evaluate(cleanKeys, at: t)
+            guard abs(a.zoom - b.zoom) < 1e-6, abs(a.center.x - b.center.x) < 0.5, abs(a.center.y - b.center.y) < 0.5 else {
+                throw SelfTestError.compare(String(format: "stale step/pin changed the camera at %.1fs: %.2f× (%.0f, %.0f) vs %.2f× (%.0f, %.0f)", t, a.zoom, a.center.x, a.center.y, b.zoom, b.center.x, b.center.y))
+            }
+        }
+    }
+
+    /// The editor's neighbour rule: a new zoom fits between holds, never
+    /// inside one, and a hold may grow only up to the gap before the next.
+    private static func checkHoldRoom() throws {
+        let a = ZoomSegment(start: 5.0, end: 8.0, zoom: 1.8)
+        let b = ZoomSegment(start: 1.0, end: 3.0, zoom: 1.8)
+        guard ZoomPlanner.freeRoom(at: 4.0, in: [a, b], duration: 10) == 3.2...4.8 else {
+            throw SelfTestError.compare("free room between zooms: \(String(describing: ZoomPlanner.freeRoom(at: 4.0, in: [a, b], duration: 10)))")
+        }
+        guard ZoomPlanner.freeRoom(at: 6.0, in: [a], duration: 10) == nil else {
+            throw SelfTestError.compare("free room reported inside a hold")
+        }
+        guard ZoomPlanner.holdRoom(for: a.id, in: [a, b], duration: 10) == 3.2...10,
+              ZoomPlanner.holdRoom(for: b.id, in: [a, b], duration: 10) == 0...4.8 else {
+            throw SelfTestError.compare("hold room crosses a neighbour")
+        }
+    }
+
+    /// Two steps whose eases clamp onto the same hold end: only the first
+    /// plays, and the keyframes, the zoom-out level, the validator and the
+    /// description all agree on that.
+    private static func checkCrowdedSteps(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 3.0
+        let seg = ZoomSegment(start: 1.0, end: 1.4, zoom: 1.5,
+                              steps: [ZoomStep(t: 1.0, zoom: 2.0), ZoomStep(t: 1.2, zoom: 3.0)])
+        let playing = planner.holdSteps(for: seg, duration: duration)
+        guard playing.map(\.zoom) == [2.0] else {
+            throw SelfTestError.compare("crowded steps: \(playing.map(\.zoom)) play, expected [2.0]")
+        }
+        let keys = planner.keyframes(from: [seg], duration: duration)
+        let atEnd = ZoomPlanner.evaluate(keys, at: 1.4).zoom
+        guard abs(atEnd - 2.0) < 1e-6 else {
+            throw SelfTestError.compare("crowded steps: hold ends at \(atEnd)×, expected 2.0×")
+        }
+        let parsed = try AgentPlan.parse(AgentPlan.encode([seg]), duration: duration, meta: meta)
+        guard parsed.segments.first?.steps.map(\.zoom) == [2.0],
+              parsed.issues.contains(where: { $0.contains("never plays") }) else {
+            throw SelfTestError.compare("validator kept a step that never plays: \(parsed.issues)")
+        }
+        guard !AgentPlan.describe([seg], planner: planner, duration: duration).contains("3.00×") else {
+            throw SelfTestError.compare("describe lists a step that never plays")
+        }
+    }
+
+    /// Overlapping zooms: the later one takes over where its motion starts,
+    /// with strictly increasing keyframe times and no cut in the level.
+    private static func checkOverlappingZooms(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 10.0
+        let keys = planner.levelKeyframes(
+            from: [ZoomSegment(start: 4.0, end: 6.0, zoom: 1.5), ZoomSegment(start: 5.0, end: 8.0, zoom: 2.5)],
+            duration: duration
+        )
+        for (p, q) in zip(keys, keys.dropFirst()) where q.t <= p.t {
+            throw SelfTestError.compare("overlapping zooms: keyframe times not increasing at \(q.t)s")
+        }
+        var t = 3.0
+        while t < 9.0 {
+            let z0 = ZoomPlanner.evaluate(keys, at: t).zoom
+            let z1 = ZoomPlanner.evaluate(keys, at: t + 0.01).zoom
+            guard abs(z1 - z0) < 0.05 else {
+                throw SelfTestError.compare(String(format: "overlapping zooms: level cuts %.2f× → %.2f× at %.2fs", z0, z1, t))
+            }
+            t += 0.01
+        }
+    }
+
     /// The editor's compare mode: plan diffing (by id and, for AI replies, by
     /// overlap) and the stacked before/after composer.
     private static func checkCompare(meta: RecordingMeta, width: Int, height: Int, duration: Double) throws {
@@ -291,12 +575,11 @@ enum SelfTest {
         func diff(_ before: [ZoomSegment], _ after: [ZoomSegment]) -> PlanDiff {
             PlanDiff(before: before, after: after, planner: planner, duration: duration)
         }
-        let a = ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, cx: 300, cy: 380,
-                            pans: [PanMove(t: 0.8, duration: 0.4, cx: 900, cy: 300)])
+        let a = ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
         guard diff([a], [a]).isEmpty else { throw SelfTestError.compare("identical plans differ") }
 
         var moved = a
-        moved.cx = 600
+        moved.zoom = 1.6
         let byID = diff([a], [moved])
         guard byID.changed == [a.id], byID.removed.isEmpty, byID.ranges.count == 1 else {
             throw SelfTestError.compare("hand edit not detected")
@@ -305,11 +588,30 @@ enum SelfTest {
         guard byID.ranges[0] == PlanDiff.Range(start: span.moveStart, end: span.outEnd) else {
             throw SelfTestError.compare("range \(byID.ranges[0]) != motion span")
         }
+        // Custom ease lengths stretch the ramps without moving the hold.
+        let mid = ZoomSegment(start: 4.0, end: 6.0, zoom: 1.8)
+        let base = planner.motionSpan(for: mid, duration: 10)
+        var slow = mid
+        slow.zoomIn = 1.4
+        slow.zoomOut = 1.6
+        let stretched = planner.motionSpan(for: slow, duration: 10)
+        guard abs(stretched.arrive - base.arrive) < 0.001, abs(stretched.end - base.end) < 0.001 else {
+            throw SelfTestError.compare("custom ease moved the hold (\(stretched.arrive) / \(stretched.end))")
+        }
+        guard stretched.moveStart < base.moveStart - 0.5, stretched.outEnd > base.outEnd + 0.5 else {
+            throw SelfTestError.compare("custom ease did not stretch ramps: \(stretched) vs \(base)")
+        }
+        let defaults = planner.motionSpan(
+            for: ZoomSegment(start: 4.0, end: 6.0, zoom: 1.8), duration: 10
+        )
+        guard defaults.moveStart == base.moveStart, defaults.outEnd == base.outEnd else {
+            throw SelfTestError.compare("nil ease lengths changed default motion span")
+        }
 
         // AI replies come back with fresh ids and two-decimal rounding.
         var rounded = a
         rounded.id = UUID()
-        rounded.cx = 300.004
+        rounded.zoom = 2.204
         guard diff([a], [rounded]).isEmpty else { throw SelfTestError.compare("re-id'd plan reported as changed") }
         var longer = rounded
         longer.end = 1.7
@@ -325,7 +627,8 @@ enum SelfTest {
         let composer = CompareComposer(
             meta: meta,
             before: planner.keyframes(from: [a], duration: duration),
-            after: planner.keyframes(from: [moved], duration: duration)
+            after: planner.keyframes(from: [moved], duration: duration),
+            cursorStyle: .bubbly
         )
         let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.6))
             .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
@@ -337,6 +640,7 @@ enum SelfTest {
     }
 
     enum SelfTestError: Error {
+        case cursor(String)
         case compare(String)
         case writerFailed
         case noTrack
@@ -345,6 +649,7 @@ enum SelfTest {
         case badExportName(String)
         case noAIProvider
         case aiResumeFailed
-        case aiIgnoredNote(segments: Int, pans: Int)
+        case aiIgnoredNote(segments: Int, steps: Int)
+        case agentTools(String)
     }
 }

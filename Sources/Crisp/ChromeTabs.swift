@@ -158,8 +158,10 @@ enum ChromeBridge {
             set w to window id \(tab.windowID)
             set ids to id of tabs of w
             set found to 0
+            -- Chrome reports tab ids as text; `is` does not coerce text ↔ integer.
             repeat with i from 1 to count of ids
-                if item i of ids is \(tab.tabID) then
+                set tid to (item i of ids) as text
+                if tid is "\(tab.tabID)" then
                     set found to i
                     exit repeat
                 end if

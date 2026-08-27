@@ -1,44 +1,61 @@
 import SwiftUI
-import AVFoundation
 import AppKit
 
-// The editor's timeline: selection, the track with one bar per zoom, the
-// icons inside each bar, the draggable hold edges, and the playhead.
+// The editor's timeline (Figma 93:1015): a ruler and three rows in one
+// card. The video row is the recording with the playhead on it; the zoom
+// row has one blue bar per zoom's hold, labelled with its level (divided
+// where a step changes it) and with grips on its edges to move where the
+// zoom starts and ends; the framing row shows, for each hold, where the
+// camera follows the cursor (grey, cursor glyph) and where it holds a
+// pinned viewport (orange band, pin glyph, edges draggable). A press
+// anywhere scrubs; the toolbar above edits the moment under the playhead.
 extension EditorView {
-    // MARK: - Timeline
+    // MARK: - Geometry
 
-    /// Assign `selection`, growing the window downward when the inspector
-    /// first appears so the preview and timeline stay put.
-    func select(_ new: Selection?) {
-        if new != nil, comparing { setComparing(false) }
-        selection = new
-        syncWindowGrowth()
-    }
+    static let rowHeight: CGFloat = 20
+    static let rowGap: CGFloat = 8
+    /// Row icon plus the gap before each track.
+    static let rowInset: CGFloat = 32
+    static let rulerHeight: CGFloat = 16
+    static var rowsHeight: CGFloat { rowHeight * 3 + rowGap * 2 }
+    static let barCorner: CGFloat = 8
+    static let barGlyphSize: CGFloat = 12
+    /// A hold part narrower than this drops its level label.
+    static let minLabelledWidth: CGFloat = 36
 
-    /// The camera-motion window for a segment as drawn on the timeline: the
-    /// zoom-in ramp begins `leadIn` early and the zoom-out eases back after
-    /// the hold ends. Mirrors ZoomPlanner.keyframes.
+    /// The camera-motion window for a segment: the zoom-in ramp begins
+    /// `leadIn` early and the zoom-out eases back after the hold ends.
     func motionSpan(
         for seg: ZoomSegment
     ) -> (moveStart: Double, arrive: Double, end: Double, outEnd: Double) {
         planner().motionSpan(for: seg, duration: duration)
     }
 
-    /// True when this segment or one of its pans is selected — or, while
-    /// comparing, when it differs from the baseline.
-    func isHighlighted(_ seg: ZoomSegment) -> Bool {
-        if comparing, let diff = planDiff, diff.changed.contains(seg.id) { return true }
-        switch selection {
-        case .segment(seg.id): return true
-        case .pan(segment: seg.id, pan: _): return true
-        default: return false
-        }
+    /// While comparing, the zooms that differ from the baseline stand out
+    /// and the rest fade; otherwise every bar is lit.
+    func isLit(_ seg: ZoomSegment) -> Bool {
+        guard comparing, let diff = planDiff else { return true }
+        return diff.changed.contains(seg.id)
     }
 
-    /// Transport button beside the bar (Figma 76:13691): the playhead's own
-    /// play/pause, then the track with one bar per zoom.
+    func x(of t: Double, width w: CGFloat) -> CGFloat {
+        duration > 0 ? t / duration * w : 0
+    }
+
+    func time(atX x: CGFloat, width w: CGFloat) -> Double {
+        min(max(0, Double(x / max(w, 1)) * duration), duration)
+    }
+
+    /// A hold's bar on a track: its x and width (at least 6pt wide).
+    func holdBounds(_ seg: ZoomSegment, width w: CGFloat) -> (x: CGFloat, width: CGFloat) {
+        let holdX = x(of: seg.start, width: w)
+        return (holdX, max(6, x(of: min(seg.end, duration), width: w) - holdX))
+    }
+
+    // MARK: - Timeline
+
     var timeline: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 16) {
             Button {
                 togglePlayback()
             } label: {
@@ -47,309 +64,447 @@ extension EditorView {
                     fallback: isPlaying ? "pause.fill" : "play.fill"
                 )
             }
-            .buttonStyle(.themed(.primary, size: .md, iconOnly: true))
+            .buttonStyle(.themed(.outline, size: .md, iconOnly: true))
             .keyboardShortcut(.space, modifiers: [])
             .tooltip("Play / pause (Space)")
-            .offset(y: 5)
-            GeometryReader { geo in
-                let w = geo.size.width
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Theme.timelineTrack)
-                        .frame(height: 32)
-                        .offset(y: 5)
-                    ForEach(segments) { seg in
-                        segmentBar(for: seg, width: w)
-                    }
-                    if comparing, let diff = planDiff {
-                        ForEach(diff.removed) { seg in
-                            removedBar(for: seg, width: w)
+            VStack(alignment: .leading, spacing: Self.rowGap) {
+                ruler
+                GeometryReader { geo in
+                    let w = max(1, geo.size.width - Self.rowInset)
+                    ZStack(alignment: .topLeading) {
+                        VStack(alignment: .leading, spacing: Self.rowGap) {
+                            row(icon: "video-camera", fallback: "video",
+                                help: "The recording — press anywhere on the timeline to scrub") {
+                                videoTrack(width: w)
+                            }
+                            row(icon: "magnifying-glass-plus", fallback: "plus.magnifyingglass",
+                                help: "Zooms: one bar per zoom with its level; drag a bar's edges to change when it starts and ends") {
+                                zoomTrack(width: w)
+                            }
+                            row(icon: "mouse-middle-click", fallback: "cursorarrow.motionlines",
+                                help: "Framing: grey where the camera follows the cursor, orange where the viewport is pinned") {
+                                framingTrack(width: w)
+                            }
                         }
+                        playhead(width: w)
                     }
-                    playhead(at: currentTime, width: w)
-                    durationLabel
-                        .offset(x: w - 23)
+                    .contentShape(Rectangle())
+                    .pointingHandCursor()
+                    // One gesture for the rows: every press scrubs. Grips carry
+                    // their own zero-distance drags, which claim the press first.
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                seek(to: time(atX: value.location.x - Self.rowInset, width: w))
+                            }
+                    )
                 }
-                .contentShape(Rectangle())
-                .pointingHandCursor()
-                // One gesture for the whole track so nothing on it can swallow
-                // a click: every press scrubs, and a press that doesn't move
-                // also selects whatever bar or icon it landed on.
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            let t = min(max(0, value.location.x / w * duration), duration)
-                            seek(to: t)
-                        }
-                        .onEnded { value in
-                            guard abs(value.translation.width) < 3, abs(value.translation.height) < 3 else { return }
-                            handleTimelineClick(at: value.location, width: w)
-                        }
-                )
+                .frame(height: Self.rowsHeight)
             }
-            .frame(height: 58)
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).fill(Theme.iconTabsList))
             .disabled(aiChat.running)
         }
     }
 
-    /// One zoom on the bar, split into its three camera phases: a hatched
-    /// zoom-in ramp (automatic, not editable), the solid hold where the crop
-    /// box and pans apply, and a hatched zoom-out ramp. The moments that
-    /// matter — zoom start, hold start, each pan — carry their icons inside
-    /// the bar; clicking one selects it for editing.
-    @ViewBuilder
-    func segmentBar(for seg: ZoomSegment, width w: CGFloat) -> some View {
-        let span = motionSpan(for: seg)
-        let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
-        let on = isHighlighted(seg)
-        let x = span.moveStart / duration * w
-        let segW = max(6, (span.outEnd - span.moveStart) / duration * w)
-        let inW = min(segW, max(0, (span.arrive - span.moveStart) / duration * w))
-        let outW = min(segW - inW, max(0, (span.outEnd - span.end) / duration * w))
-        let holdW = max(0, segW - inW - outW)
-        let holdX = x + inW
-
-        // Base: ramps are faint; the hold is the strong part of the bar.
-        shape.fill(Theme.zoomBarMuted.opacity(on ? 0.6 : 0.4))
-            .frame(width: segW, height: 32)
-            .offset(x: x, y: 5)
-
-        // Zoom-in ramp
-        if inW > 0 {
-            Hatch(color: Theme.zoomBar.opacity(on ? 0.9 : 0.5))
-                .frame(width: inW, height: 32)
-                .clipShape(shape)
-                .offset(x: x, y: 5)
-                .tooltip("Zooming in — automatic, not editable")
-        }
-        // Hold
-        if holdW > 0 {
-            Group {
-                if on {
-                    PrimaryChrome(shape: shape, fill: Theme.zoomBar, border: Theme.zoomBarBorder, small: true)
-                } else {
-                    shape.fill(Theme.zoomBarMuted)
+    /// "0:00", a tick every 5pt, and the length at the far end.
+    var ruler: some View {
+        HStack(spacing: 8) {
+            Text("0:00")
+                .font(Theme.font(.label12))
+                .monospacedDigit()
+                .foregroundStyle(Theme.foreground)
+                .frame(width: Self.rowInset - 8, alignment: .leading)
+            Canvas { context, size in
+                var x: CGFloat = 0.5
+                while x < size.width {
+                    context.fill(Path(CGRect(x: x, y: 4, width: 1, height: 8)), with: .color(Theme.ruler))
+                    x += 5
                 }
             }
-            .frame(width: holdW, height: 32)
-            .offset(x: holdX, y: 5)
-            .tooltip(String(format: "Holding at %.1f× for %.1fs — click to edit, drag the edges to extend or shorten it",
-                         seg.zoom, span.end - span.arrive))
+            .overlay(alignment: .trailing) {
+                Text(shortTimecode(duration))
+                    .font(Theme.font(.label12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.foreground)
+                    .padding(.leading, 6)
+                    .background(Theme.iconTabsList)
+            }
         }
-        // Zoom-out ramp
-        if outW > 0 {
-            Hatch(color: Theme.zoomBar.opacity(on ? 0.9 : 0.5))
-                .frame(width: outW, height: 32)
-                .clipShape(shape)
-                .offset(x: holdX + holdW, y: 5)
-                .tooltip("Zooming out — automatic, not editable")
-        }
+        .frame(height: Self.rulerHeight)
+    }
 
-        // Icons inside the bar, 12pt, vertically centered (Figma 76:13698).
-        // Plain views, not buttons: the track's gesture routes clicks to them
-        // (see handleTimelineClick) so they never block scrubbing.
-        ForEach(barIcons(for: seg, span: span, x: x, width: segW, timelineWidth: w)) { icon in
-            HStack(spacing: 2) {
-                Icon(name: icon.name, size: 12, fallback: icon.fallback)
-                if let label = icon.label {
-                    Text(label)
-                        .font(Theme.font(.label12))
-                        .monospacedDigit()
+    /// A row's 16pt icon and its track.
+    func row<Track: View>(icon: String, fallback: String, help: String, @ViewBuilder track: () -> Track) -> some View {
+        HStack(spacing: 16) {
+            Icon(name: icon, size: 16, fallback: fallback)
+                .foregroundStyle(Theme.foreground)
+                .tooltip(help)
+            track()
+        }
+        .frame(height: Self.rowHeight)
+    }
+
+    /// A bar on a track: a solid fill with a white@50 hairline (Figma 93:789).
+    func bar(_ fill: Color, border: Color = Theme.barBorder) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
+        return shape.fill(fill)
+            .overlay(shape.strokeBorder(border, lineWidth: 1))
+    }
+
+    // MARK: - Video row
+
+    func videoTrack(width w: CGFloat) -> some View {
+        bar(Theme.videoBar)
+            .frame(width: w, height: Self.rowHeight)
+            .allowsHitTesting(false)
+    }
+
+    // MARK: - Zoom row
+
+    func zoomTrack(width w: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
+                .fill(Theme.timelineTrack)
+                .frame(width: w, height: Self.rowHeight)
+                .allowsHitTesting(false)
+            ForEach(segments) { seg in
+                zoomBar(for: seg, width: w)
+            }
+            if comparing, let diff = planDiff {
+                ForEach(diff.removed) { seg in
+                    removedBar(for: seg, width: w)
                 }
             }
-            .foregroundStyle(on ? Theme.zoomBarForeground : Theme.foreground)
-            .tooltip(icon.help)
-            .offset(x: icon.x, y: 15)
-            .zIndex(2)
         }
-
-        // Edge grips on the hold: drag to move where the zoom starts or ends.
-        if holdW > 0 {
-            ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
-                let edgeX = edge == .leading ? holdX : holdX + holdW
-                TimelineEdgeHandle(
-                    highlighted: on,
-                    dragging: edgeDrag.map { $0.id == seg.id && $0.edge == edge } ?? false,
-                    onDrag: { dx in dragEdge(of: seg.id, edge, translation: dx, width: w) },
-                    onEnd: { edgeDrag = nil }
-                )
-                .offset(x: edgeX - TimelineEdgeHandle.width / 2, y: 5)
-                .tooltip(edge == .leading
-                      ? "Drag to change where this zoom starts"
-                      : "Drag to change where this zoom ends")
-                .zIndex(3)
-            }
-        }
+        .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
     }
 
-    /// A click (press without movement) on the track: select the icon it
-    /// landed on, else the bar; clicks on the empty track only scrub.
-    func handleTimelineClick(at point: CGPoint, width w: CGFloat) {
-        guard point.y >= 5, point.y <= 37 else { return }
-        for seg in segments {
-            let span = motionSpan(for: seg)
-            let x = span.moveStart / duration * w
-            let segW = max(6, (span.outEnd - span.moveStart) / duration * w)
-            guard point.x >= x, point.x <= x + segW else { continue }
-            let icons = barIcons(for: seg, span: span, x: x, width: segW, timelineWidth: w)
-            if let icon = icons.first(where: { point.x >= $0.x - 2 && point.x <= $0.x + $0.width + 2 }) {
-                icon.action()
-            } else {
-                select(.segment(seg.id))
-            }
-            return
-        }
-    }
-
-    /// An icon placed inside a zoom's bar at the moment it marks.
-    struct BarIcon: Identifiable {
+    /// One stretch of a hold at a single level: from the zoom's start (or a
+    /// step) to the next step (or the end).
+    struct HoldPart: Identifiable {
         let id: String
-        let name: String
-        let fallback: String
-        let label: String?
-        let help: String
-        var x: CGFloat
+        let x: CGFloat
         let width: CGFloat
-        let action: () -> Void
+        let level: Double
+        let help: String
     }
 
-    /// The zoom-in, hold (with the zoom level when there is room) and pan
-    /// icons for one bar. Each sits at its own time, or just after the
-    /// previous icon when they would overlap; whatever no longer fits inside
-    /// the bar is left off (the bar itself still selects the zoom).
-    func barIcons(
-        for seg: ZoomSegment,
-        span: (moveStart: Double, arrive: Double, end: Double, outEnd: Double),
-        x: CGFloat, width segW: CGFloat, timelineWidth w: CGFloat
-    ) -> [BarIcon] {
-        let inset: CGFloat = 5
-        let gap: CGFloat = 8
-        let holdW = (span.end - span.arrive) / duration * w
-        let level = holdW >= 48 ? String(format: "%.1f×", seg.zoom) : nil
-        var wanted: [BarIcon] = [
-            BarIcon(
-                id: "zoom", name: "magnifying-glass-plus", fallback: "plus.magnifyingglass",
-                label: nil, help: "Zoom start — click to edit",
-                x: span.moveStart / duration * w + inset, width: 12
-            ) { select(.segment(seg.id)) },
-            BarIcon(
-                id: "hold", name: "pause", fallback: "pause.fill",
-                label: level, help: "Fully zoomed — the camera holds at this level from here",
-                x: span.arrive / duration * w + inset, width: level == nil ? 12 : 42
-            ) { select(.segment(seg.id)) },
-        ]
-        for pan in seg.pans.sorted(by: { $0.t < $1.t }) {
-            if let stepZoom = pan.zoom {
-                let stepLabel = holdW >= 96 ? String(format: "%.1f×", stepZoom) : nil
-                wanted.append(BarIcon(
-                    id: pan.id.uuidString, name: "magnifying-glass-plus",
-                    fallback: "plus.magnifyingglass",
-                    label: stepLabel, help: "Zooms in further here — click to edit",
-                    x: pan.t / duration * w + inset, width: stepLabel == nil ? 12 : 42
-                ) { select(.pan(segment: seg.id, pan: pan.id)) })
-            } else {
-                wanted.append(BarIcon(
-                    id: pan.id.uuidString, name: "arrows-out-cardinal",
-                    fallback: "arrow.up.and.down.and.arrow.left.and.right",
-                    label: nil, help: "Pan start — click to edit",
-                    x: pan.t / duration * w + inset, width: 12
-                ) { select(.pan(segment: seg.id, pan: pan.id)) })
-            }
+    /// The hold split at each step, left to right.
+    func holdParts(for seg: ZoomSegment, x holdX: CGFloat, width holdW: CGFloat, trackWidth w: CGFloat) -> [HoldPart] {
+        var edges: [(x: CGFloat, level: Double, help: String)] = [(
+            holdX, seg.zoom,
+            String(format: "Zoomed %.1f× — drag the edges to change when it starts and ends; the toolbar sets the level at the playhead", seg.zoom)
+        )]
+        for step in holdSteps(in: seg) {
+            let window = stepWindow(step, in: seg)
+            edges.append((
+                x(of: window.start, width: w), step.zoom,
+                String(format: "Zoom changes to %.1f× from here (eases over %.1fs)", step.zoom, window.end - window.start)
+            ))
         }
-        var placed: [BarIcon] = []
-        var cursor = x + inset
-        let limit = x + segW - inset
-        for var icon in wanted {
-            icon.x = max(icon.x, cursor)
-            guard icon.x + icon.width <= limit else { break }
-            placed.append(icon)
-            cursor = icon.x + icon.width + gap
+        return edges.indices.map { i in
+            let next = i + 1 < edges.count ? edges[i + 1].x : holdX + holdW
+            return HoldPart(
+                id: "\(seg.id)-\(i)", x: edges[i].x, width: max(0, next - edges[i].x),
+                level: edges[i].level, help: edges[i].help
+            )
         }
-        return placed
     }
 
-    /// Move a zoom's start or end by the pointer's travel since the drag
-    /// began, keeping the inspector's 0.2s minimum length. The playhead is
-    /// left alone: the grips only resize, they never scrub.
-    func dragEdge(of id: UUID, _ edge: HorizontalEdge, translation dx: CGFloat, width w: CGFloat) {
-        guard w > 0, let index = segments.firstIndex(where: { $0.id == id }) else { return }
-        let seg = segments[index]
-        let drag: EdgeDrag
-        if let current = edgeDrag, current.id == id, current.edge == edge {
-            drag = current
-        } else {
-            drag = EdgeDrag(id: id, edge: edge, origin: edge == .leading ? seg.start : seg.end)
-            edgeDrag = drag
+    /// A zoom's hold as a blue bar with its level in every part, a hairline
+    /// where a step changes it, and grips on both edges.
+    @ViewBuilder
+    func zoomBar(for seg: ZoomSegment, width w: CGFloat) -> some View {
+        let (holdX, holdW) = holdBounds(seg, width: w)
+        let lit = isLit(seg)
+
+        bar(Theme.zoomBar)
+            .frame(width: holdW, height: Self.rowHeight)
+            .offset(x: holdX)
+            .opacity(lit ? 1 : 0.4)
+            .allowsHitTesting(false)
+
+        // Each part carries its level and its tooltip; the press itself
+        // falls through to the track gesture, which scrubs.
+        ForEach(holdParts(for: seg, x: holdX, width: holdW, trackWidth: w)) { part in
+            Color.clear
+                .frame(width: part.width, height: Self.rowHeight)
+                .overlay {
+                    if part.width >= Self.minLabelledWidth {
+                        Text(String(format: "%.1f×", part.level))
+                            .font(Theme.font(.label12))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.primaryForeground)
+                    }
+                }
+                .contentShape(Rectangle())
+                .offset(x: part.x)
+                .tooltip(part.help)
         }
-        let t = drag.origin + Double(dx / w) * duration
-        switch edge {
-        case .leading:
-            segments[index].start = min(max(0, t), seg.end - 0.2)
-        case .trailing:
-            segments[index].end = max(min(duration, t), seg.start + 0.2)
+
+        ForEach(holdSteps(in: seg)) { step in
+            Rectangle()
+                .fill(Theme.barBorder)
+                .frame(width: 1, height: Self.rowHeight - 4)
+                .offset(x: x(of: stepWindow(step, in: seg).start, width: w), y: 2)
+                .allowsHitTesting(false)
+        }
+
+        ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+            let edgeX = edge == .leading ? holdX : holdX + holdW
+            let target: TimelineDrag.Target = edge == .leading ? .zoomStart(seg.id) : .zoomEnd(seg.id)
+            TimelineEdgeHandle(
+                color: Theme.zoomBar,
+                dragging: timelineDrag?.target == target,
+                onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                onEnd: { timelineDrag = nil }
+            )
+            .offset(x: edgeX - TimelineEdgeHandle.width / 2)
+            .tooltip(edge == .leading
+                  ? "Zoom start — drag to change where this zoom starts"
+                  : "Zoom end — drag to change where this zoom ends")
+            .zIndex(3)
         }
     }
 
     /// A baseline zoom that the current plan no longer has: a dashed outline
-    /// over its old motion window, shown only while comparing.
+    /// over its old hold, shown only while comparing.
     func removedBar(for seg: ZoomSegment, width w: CGFloat) -> some View {
-        let span = motionSpan(for: seg)
-        let x = span.moveStart / duration * w
-        let segW = max(6, (span.outEnd - span.moveStart) / duration * w)
-        return RoundedRectangle(cornerRadius: 2, style: .continuous)
+        let (holdX, holdW) = holdBounds(seg, width: w)
+        return RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
             .strokeBorder(Theme.destructive.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-            .frame(width: segW, height: 32)
-            .offset(x: x, y: 5)
+            .frame(width: holdW, height: Self.rowHeight)
+            .offset(x: holdX)
             .allowsHitTesting(false)
             .tooltip("Removed since the baseline")
     }
 
-    /// 6×42 destructive playhead (Figma 38:5167) plus a Label/12 time under it.
-    func playhead(at time: Double, width w: CGFloat) -> some View {
-        let x = min(max(0, time / duration * w), w) - 3
-        return VStack(spacing: 0) {
+    // MARK: - Framing row
+
+    struct TimeRange: Identifiable {
+        let from: Double
+        let until: Double
+        var id: Double { from }
+    }
+
+    /// The stretches of a hold where the camera follows the cursor: the
+    /// gaps between (and around) its pins.
+    func followStretches(for seg: ZoomSegment, windows: [(id: UUID, from: Double, until: Double)]) -> [TimeRange] {
+        var out: [TimeRange] = []
+        var cursor = seg.start
+        for window in windows {
+            if window.from > cursor + 0.001 { out.append(TimeRange(from: cursor, until: window.from)) }
+            cursor = max(cursor, window.until)
+        }
+        let end = min(seg.end, duration)
+        if end > cursor + 0.001 { out.append(TimeRange(from: cursor, until: end)) }
+        return out
+    }
+
+    func framingTrack(width w: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.frame(width: w, height: Self.rowHeight)
+            ForEach(segments) { seg in
+                framingSpan(for: seg, width: w)
+            }
+        }
+        .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
+    }
+
+    /// A hold on the framing row: a grey span with a cursor glyph at the
+    /// start of each following stretch and an orange band for each pin.
+    @ViewBuilder
+    func framingSpan(for seg: ZoomSegment, width w: CGFloat) -> some View {
+        let (holdX, holdW) = holdBounds(seg, width: w)
+        let lit = isLit(seg)
+        let windows = pinWindows(for: seg)
+
+        RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
+            .fill(Theme.timelineTrack)
+            .frame(width: holdW, height: Self.rowHeight)
+            .offset(x: holdX)
+            .allowsHitTesting(false)
+
+        ForEach(followStretches(for: seg, windows: windows)) { stretch in
+            let fromX = x(of: stretch.from, width: w)
+            glyphSpan(
+                x: fromX, width: max(0, x(of: stretch.until, width: w) - fromX),
+                icon: "cursor-click", fallback: "cursorarrow.click",
+                help: windows.isEmpty
+                    ? "The camera follows the cursor through this zoom — Pin viewport holds it still"
+                    : "The camera follows the cursor here"
+            )
+        }
+
+        ForEach(windows, id: \.id) { window in
+            pinBand(for: seg, window: window, lit: lit, trackWidth: w)
+        }
+    }
+
+    /// The part of a hold whose viewport is pinned: an orange band with a
+    /// pin glyph at its start; both edges drag.
+    @ViewBuilder
+    func pinBand(for seg: ZoomSegment, window: (id: UUID, from: Double, until: Double), lit: Bool, trackWidth w: CGFloat) -> some View {
+        let fromX = x(of: window.from, width: w)
+        let bandW = max(4, x(of: window.until, width: w) - fromX)
+        let open = seg.pins.first { $0.id == window.id }?.until == nil
+
+        bar(Theme.pinBar, border: Theme.pinBarBorder)
+            .frame(width: bandW, height: Self.rowHeight)
+            .offset(x: fromX)
+            .opacity(lit ? 1 : 0.4)
+            .allowsHitTesting(false)
+
+        glyphSpan(
+            x: fromX, width: bandW,
+            icon: "map-pin-simple-area", fallback: "mappin.and.ellipse",
+            help: open
+                ? "Viewport pinned from \(shortTimecode(window.from)) to the end of this zoom — scrub ahead and Unpin where the camera should follow again; drag the crop box to move the pinned spot"
+                : "Viewport pinned \(shortTimecode(window.from))–\(shortTimecode(window.until)) — drag the edges to change when; drag the crop box to move the pinned spot"
+        )
+
+        ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+            let target: TimelineDrag.Target = edge == .leading
+                ? .pinStart(segment: seg.id, pin: window.id)
+                : .pinEnd(segment: seg.id, pin: window.id)
+            TimelineEdgeHandle(
+                color: Theme.pinBar,
+                dragging: timelineDrag?.target == target,
+                onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                onEnd: { timelineDrag = nil }
+            )
+            .offset(x: (edge == .leading ? fromX : fromX + bandW) - TimelineEdgeHandle.width / 2)
+            .tooltip(edge == .leading
+                  ? "Pin starts here — drag to change when"
+                  : "Pin releases here — drag to change when the camera follows the cursor again")
+            .zIndex(3)
+        }
+    }
+
+    /// A stretch on the framing row that carries a tooltip and, when wide
+    /// enough, a glyph at its start. The press falls through to the scrub.
+    func glyphSpan(x: CGFloat, width: CGFloat, icon: String, fallback: String, help: String) -> some View {
+        Color.clear
+            .frame(width: width, height: Self.rowHeight)
+            .overlay(alignment: .leading) {
+                if width >= Self.barGlyphSize + 14 {
+                    Icon(name: icon, size: Self.barGlyphSize, fallback: fallback)
+                        .foregroundStyle(Theme.foreground)
+                        .padding(.leading, 7)
+                }
+            }
+            .contentShape(Rectangle())
+            .offset(x: x)
+            .tooltip(help)
+    }
+
+    // MARK: - Playhead
+
+    /// 5×24 destructive handle on the video row (Figma 94:1558) and a
+    /// hairline down the other rows so pins line up with zooms.
+    func playhead(width w: CGFloat) -> some View {
+        let px = min(max(0, x(of: currentTime, width: w)), w)
+        return ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(Theme.destructive.opacity(0.5))
+                .frame(width: 1, height: Self.rowsHeight)
+                .offset(x: px)
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(Theme.destructive)
                 .overlay(
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.24), lineWidth: 1)
                 )
-                .frame(width: 6, height: 42)
-            Text(timecodeShort(time))
-                .font(Theme.font(.label12))
-                .monospacedDigit()
-                .foregroundStyle(Theme.foreground)
-                .frame(width: 30)
+                .frame(width: 5, height: 24)
+                .offset(x: px - 2, y: -2)
         }
-        .frame(width: 30)
-        .offset(x: x - 12)
-        .zIndex(1)
+        .offset(x: Self.rowInset)
+        .zIndex(4)
         .allowsHitTesting(false)
     }
 
-    var durationLabel: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(width: 6, height: 42)
-            Text(timecodeShort(duration))
-                .font(Theme.font(.label12))
-                .monospacedDigit()
-                .foregroundStyle(Theme.foreground)
-                .frame(width: 30)
+    // MARK: - Moving keyframes
+
+    /// Move a keyframe by the pointer's travel since its drag began. Zoom
+    /// edges keep the minimum hold and stay clear of the neighbouring
+    /// zooms; a pin stays inside its hold and clear of the pins either side
+    /// of it. Drags only move keyframes, they never scrub.
+    func dragKeyframe(_ target: TimelineDrag.Target, translation dx: CGFloat, width w: CGFloat) {
+        guard w > 0 else { return }
+        let drag: TimelineDrag
+        if let current = timelineDrag, current.target == target {
+            drag = current
+        } else {
+            guard let origin = keyframeTime(target) else { return }
+            drag = TimelineDrag(target: target, origin: origin)
+            timelineDrag = drag
         }
-        .frame(width: 30)
-        .allowsHitTesting(false)
+        let t = drag.origin + Double(dx / w) * duration
+        switch target {
+        case .zoomStart(let id):
+            guard let i = segments.firstIndex(where: { $0.id == id }) else { return }
+            let room = ZoomPlanner.holdRoom(for: id, in: segments, duration: duration)
+            segments[i].start = min(max(room.lowerBound, t), segments[i].end - ZoomPlanner.minHold)
+        case .zoomEnd(let id):
+            guard let i = segments.firstIndex(where: { $0.id == id }) else { return }
+            let room = ZoomPlanner.holdRoom(for: id, in: segments, duration: duration)
+            segments[i].end = max(min(room.upperBound, t), segments[i].start + ZoomPlanner.minHold)
+        case .pinStart(let segID, let pinID):
+            guard let at = pinIndices(segment: segID, pin: pinID) else { return }
+            let seg = segments[at.seg]
+            let windows = pinWindows(for: seg)
+            guard let wi = windows.firstIndex(where: { $0.id == pinID }) else { return }
+            let floor = wi > 0 ? windows[wi - 1].until : seg.start
+            let from = min(max(t, floor), max(floor, windows[wi].until - 0.1))
+            // Back at the hold's start means "from the start" — store nothing.
+            segments[at.seg].pins[at.pin].from = from <= seg.start + 0.001 ? nil : from
+        case .pinEnd(let segID, let pinID):
+            guard let at = pinIndices(segment: segID, pin: pinID) else { return }
+            let seg = segments[at.seg]
+            let windows = pinWindows(for: seg)
+            guard let wi = windows.firstIndex(where: { $0.id == pinID }) else { return }
+            let ceiling = wi + 1 < windows.count ? windows[wi + 1].from : seg.end
+            let until = max(min(t, ceiling), min(ceiling, windows[wi].from + 0.1))
+            // At the hold's end the pin is open again: held until released.
+            segments[at.seg].pins[at.pin].until = until >= seg.end - 0.001 ? nil : until
+        }
+    }
+
+    /// The model time a drag target currently has (unclamped, so a drag
+    /// stays relative to the pointer).
+    func keyframeTime(_ target: TimelineDrag.Target) -> Double? {
+        switch target {
+        case .zoomStart(let id):
+            return segments.first { $0.id == id }?.start
+        case .zoomEnd(let id):
+            return segments.first { $0.id == id }?.end
+        case .pinStart(let segID, let pinID):
+            guard let seg = segments.first(where: { $0.id == segID }) else { return nil }
+            return planner().pinWindow(pinID, in: seg, duration: duration)?.from
+        case .pinEnd(let segID, let pinID):
+            guard let seg = segments.first(where: { $0.id == segID }) else { return nil }
+            return planner().pinWindow(pinID, in: seg, duration: duration)?.until
+        }
+    }
+
+    func pinIndices(segment segID: UUID, pin pinID: UUID) -> (seg: Int, pin: Int)? {
+        guard let seg = segments.firstIndex(where: { $0.id == segID }),
+              let pin = segments[seg].pins.firstIndex(where: { $0.id == pinID }) else { return nil }
+        return (seg, pin)
     }
 }
 
-/// Grip straddling one edge of a zoom's hold on the timeline. Shows the
-/// horizontal-resize cursor and reports pointer travel while dragged; the
-/// editor turns that into a new start or end time. Its zero-distance drag
-/// claims the press ahead of the track's scrub gesture, so clicking a grip
-/// does nothing and only a drag has an effect.
+/// Grip straddling one edge of a bar: a 2×10 pill in the bar's colour
+/// with a pale rim that grows on hover. Shows the horizontal-resize
+/// cursor and reports pointer travel while dragged; the editor turns that
+/// into a new time. Its zero-distance drag claims the press ahead of the
+/// track's scrub gesture, so clicking a grip does nothing and only a drag
+/// has an effect.
 private struct TimelineEdgeHandle: View {
     static let width: CGFloat = 10
 
-    let highlighted: Bool
+    let color: Color
     let dragging: Bool
     let onDrag: (CGFloat) -> Void
     let onEnd: () -> Void
@@ -360,11 +515,13 @@ private struct TimelineEdgeHandle: View {
     var body: some View {
         let active = hovering || dragging
         Color.clear
-            .frame(width: Self.width, height: 32)
+            .frame(width: Self.width, height: EditorView.rowHeight)
             .overlay {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(Color.white.opacity(active ? 0.95 : (highlighted ? 0.6 : 0.4)))
-                    .frame(width: 2, height: active ? 18 : 12)
+                Capsule()
+                    .fill(color)
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.7), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.13), radius: 1, x: -1, y: 0)
+                    .frame(width: 2, height: active ? 14 : 10)
             }
             .contentShape(Rectangle())
             .onHover { inside in

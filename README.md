@@ -22,12 +22,22 @@ Meanwhile a global mouse monitor logs clicks and samples the cursor position at
 60Hz, timestamped on the same host clock as the video frames, into
 `events.json` beside the master.
 
-**Export phase** — "Export with Zooms" clusters the clicks into zoom segments,
-generates smoothstep-eased camera keyframes (zoom in before a click, hold, pan
-to follow-up clicks, zoom back out), and renders offline: the master is
-decoded at 10 bits, the camera crop/scale is applied in Core Image (16-bit
-float working space), a vector-drawn cursor and click ripples are composited
-on top, and the result is written as high-bitrate 10-bit HEVC (`export.mov`).
+**Zoom editor** — opening a recording shows a preview with the zooms applied
+live and a three-row timeline (video, zooms, framing). The camera follows the
+cursor on its own; you set the zoom level and timing (drag a zoom's edges),
+and can pin the viewport for part of a zoom when the action isn't under the
+mouse. The ⋮ menu picks the cursor drawn on the video — the classic macOS
+pointer, or a chunkier glossy one — per recording. The **AI editor** hands the
+plan, the click log and annotated stills to Claude Code or Codex for an
+editorial pass, with a before/after Compare. Edits autosave to `plan.json`
+beside the master.
+
+**Export phase** — "Export with zooms" clusters the clicks into zoom segments
+(or uses the edited plan), bakes smoothstep-eased camera keyframes with the
+cursor follower, and renders offline: the master is decoded at 10 bits, the
+camera crop/scale is applied in Core Image (16-bit float working space), a
+vector-drawn cursor and click ripples are composited on top, and the result is
+written as high-bitrate 10-bit HEVC (`export.mov`).
 
 The renderer runs on a fixed 60fps output clock, holding the last source frame
 while the camera animates — necessary because ScreenCaptureKit only emits
@@ -98,14 +108,13 @@ output folder for inspection.
 ## Roadmap
 
 - ~~Self-signed signing certificate~~ — done ("Crisp Dev Signing", auto-detected by bundle.sh)
-- ~~Editable zoom timeline~~ — done: per-recording Zoom Editor (live preview via
-  shared FrameComposer + AVVideoCompositing, segments saved to plan.json)
-- Draggable segment edges on the editor timeline (currently sliders)
-- Click-to-set zoom center on the preview (currently X/Y sliders)
+- ~~Editable zoom timeline~~ — done: per-recording zoom editor (live preview via
+  shared FrameComposer + AVVideoCompositing, draggable zoom and pin edges,
+  crop box on the preview, plan saved to plan.json)
+- ~~Cursor-follow camera mode~~ — done: the follower frames every zoom
+- ~~AI editorial pass~~ — done: the AI editor (Claude Code / Codex) with Compare
 - Track window movement during window capture (clicks currently map against
   the window's position at record start)
-- Preview playback before export
 - Menu-bar recording controls + global stop shortcut
-- Cursor-follow camera mode (samples are already recorded)
 - Optional element-aware zoom via the Accessibility API
 - Microphone track, webcam overlay, GIF export
