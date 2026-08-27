@@ -177,4 +177,3 @@ final class CompactRenameFieldCell: NSTextFieldCell {
     }
 }
 
-/// Edit / export / reveal / trash for one recording (Figma 76:13334).

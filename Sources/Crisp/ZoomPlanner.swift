@@ -232,7 +232,9 @@ struct ZoomPlanner {
         segments.sorted { $0.start < $1.start }.compactMap { seg in
             let span = motionSpan(for: seg, duration: duration)
             guard span.end > span.moveStart else { return nil }
-            let levelOut = seg.steps.filter { $0.t <= span.end }.max { $0.t < $1.t }?.zoom ?? seg.zoom
+            // Every step lands inside the hold (stepWindow clamps it), so the
+            // last one by time is the level the zoom-out starts from.
+            let levelOut = seg.steps.max { $0.t < $1.t }?.zoom ?? seg.zoom
             let pins = pinWindows(for: seg, duration: duration).compactMap { window in
                 seg.pins.first { $0.id == window.id }.map { ($0.point, window.from, window.until) }
             }
@@ -322,6 +324,7 @@ struct ZoomPlanner {
                 continue
             }
             let holdZoom = max(state.holdZoom, 1.0001)
+            while nextClick < clicks.count, clicks[nextClick].t < time - 0.001 { nextClick += 1 }
             if !inWindow {
                 // Pin full frame right before the ramp so the previous
                 // full-frame stretch doesn't drift toward this key.
@@ -331,7 +334,6 @@ struct ZoomPlanner {
                 }
                 // Open on the action: the pin if it applies from the start,
                 // else the first click coming up, else the cursor.
-                while nextClick < clicks.count, clicks[nextClick].t < time - 0.001 { nextClick += 1 }
                 var opening = frameCenter
                 if let pin = state.pin {
                     opening = pin
@@ -349,7 +351,6 @@ struct ZoomPlanner {
             // Raw target: the pin while it applies; else an upcoming click,
             // else the cursor a moment ahead when it has strayed out of the
             // dead zone.
-            while nextClick < clicks.count, clicks[nextClick].t < time - 0.001 { nextClick += 1 }
             if state.pin == nil, nextClick < clicks.count, clicks[nextClick].t <= time + config.clickLookAhead {
                 let click = clicks[nextClick]
                 clickTarget = (CGPoint(x: click.x, y: click.y), click.t + config.clickHold)
@@ -434,9 +435,8 @@ struct ZoomPlanner {
             return Camera(zoom: 1, center: .zero)
         }
         if t <= first.t { return first.camera }
-        guard let last = keys.last, t < last.t else {
-            return keys.last!.camera
-        }
+        let last = keys[keys.count - 1]
+        if t >= last.t { return last.camera }
         // Find i with keys[i-1].t <= t < keys[i].t.
         var i: Int
         if cursor >= 1, cursor < keys.count, keys[cursor - 1].t <= t, t < keys[cursor].t {
@@ -469,6 +469,12 @@ struct ZoomPlanner {
 
     /// Keep the zoomed crop fully inside the frame.
     func clampedCenter(_ p: CGPoint, zoom: Double) -> CGPoint {
+        Self.clampedCenter(p, zoom: zoom, width: width, height: height)
+    }
+
+    /// The same clamp for callers without a planner (the editor's crop box),
+    /// so what the box shows is exactly what renders.
+    static func clampedCenter(_ p: CGPoint, zoom: Double, width: Double, height: Double) -> CGPoint {
         let halfW = width / zoom / 2
         let halfH = height / zoom / 2
         return CGPoint(

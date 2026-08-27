@@ -9,8 +9,6 @@ enum MasterCodec: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
 
-    var fileExtension: String { "mov" }
-
     /// Shown under the name in the codec select.
     var detail: String {
         switch self {
@@ -50,7 +48,7 @@ enum ExportFormat: String, CaseIterable, Identifiable, Codable {
 /// Times are in seconds relative to the capture session start (first video frame).
 struct MouseEvent: Codable {
     enum Kind: String, Codable {
-        case leftDown, leftUp, rightDown, scroll
+        case leftDown, leftUp, rightDown
     }
 
     var t: Double
@@ -251,12 +249,6 @@ struct Recording: Identifiable, Equatable {
 
     var name: String { folder.lastPathComponent }
 
-    /// The master plus every export, for the expandable library row.
-    var files: [RecordingFile] {
-        [RecordingFile(url: masterURL, kind: .master)]
-            + exportURLs.map { RecordingFile(url: $0, kind: .export(Self.exportIndex(of: $0.deletingPathExtension().lastPathComponent) ?? 1)) }
-    }
-
     /// Existing exports, oldest first ("export.mov", "export 2.mp4", …).
     var exportURLs: [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
@@ -276,7 +268,7 @@ struct Recording: Identifiable, Equatable {
 
     /// What the library sidebar shows under a recording's name: the container
     /// and size of the newest file (latest export, else the master), plus the
-    /// zoom and pan counts of the current plan.json.
+    /// zoom and step counts of the current plan.json.
     struct Summary: Equatable {
         var format: String
         var fileSize: Int64?
@@ -350,46 +342,9 @@ struct Recording: Identifiable, Equatable {
     }
 }
 
-/// One video inside a recording folder: the original master or a numbered export.
-struct RecordingFile: Identifiable, Equatable {
-    enum Kind: Equatable {
-        case master
-        case export(Int)
-    }
-
-    var id: URL { url }
-    let url: URL
-    let kind: Kind
-
-    var isMaster: Bool { kind == .master }
-
-    /// "Original", "Export", "Export 2", …
-    var title: String {
-        switch kind {
-        case .master: return "Original"
-        case .export(let n): return n == 1 ? "Export" : "Export \(n)"
-        }
-    }
-
-    /// "MOV" / "MP4"
-    var format: String { url.pathExtension.uppercased() }
-
-    var planSnapshotURL: URL? {
-        isMaster ? nil : Recording.planSnapshotURL(for: url)
-    }
-
-    /// Number of zooms in this export's plan snapshot; nil for the master or
-    /// exports made before snapshots existed.
-    var zoomCount: Int? {
-        guard let planSnapshotURL else { return nil }
-        return Recording.loadPlanSegments(from: planSnapshotURL)?.count
-    }
-
-    var fileSize: Int64? {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
-    }
-
-    var modifiedAt: Date? {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-    }
+/// "0:04" — a moment as m:ss, rounded to the second: how the editor's
+/// toolbar, the AI panel's timestamp chips and the agent's briefing show it.
+func shortTimecode(_ t: Double) -> String {
+    let total = Int(max(0, t).rounded())
+    return String(format: "%d:%02d", total / 60, total % 60)
 }

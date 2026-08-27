@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One row in the AI Polish conversation.
+/// One row in the AI editor conversation.
 struct AIMessage: Identifiable {
     enum Role { case user, assistant, system }
 
@@ -28,7 +28,7 @@ struct AIMessage: Identifiable {
     }
 }
 
-/// Conversation state for the editor's AI Polish panel. One per editor window;
+/// Conversation state for the editor's AI editor panel. One per editor window;
 /// the underlying provider session is recreated if the provider changes.
 @MainActor
 final class AIChat: ObservableObject {
@@ -101,7 +101,7 @@ final class AIChat: ObservableObject {
         return provider.defaultModel
     }
 
-    /// Send a note (may be empty on the first turn = "default polish").
+    /// Send a note (may be empty on the first turn = the default brief).
     /// `apply` is called on the main actor with the validated new plan, after
     /// every streamed event has landed in the transcript.
     func send(
@@ -126,7 +126,7 @@ final class AIChat: ObservableObject {
         guard let session else { return }
 
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        messages.append(AIMessage(role: .user, text: trimmed.isEmpty ? "Polish with the default brief" : trimmed,
+        messages.append(AIMessage(role: .user, text: trimmed.isEmpty ? "Default brief" : trimmed,
                                   timestamp: timestamp))
         let reply = AIMessage(role: .assistant, text: "")
         messages.append(reply)
@@ -216,10 +216,8 @@ struct AIPanelView: View {
     let recording: Recording
     let meta: RecordingMeta?
     let duration: Double
-    /// The editor's playhead, offered as "Attach timestamp".
-    let currentTime: Double
-    /// A moment attached to the next note (Figma 83:14758); the editor's
-    /// "Send timestamp to chat" sets it from the toolbar.
+    /// A moment attached to the next note (Figma 83:14758), set by the
+    /// editor toolbar's "Send timestamp to chat".
     @Binding var attachedTime: Double?
     let segments: [ZoomSegment]
     let onApply: ([ZoomSegment]) -> Void
@@ -229,12 +227,6 @@ struct AIPanelView: View {
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
-
-    /// "0:04" — the short timecode the chips show.
-    static func timecode(_ t: Double) -> String {
-        let total = Int(max(0, t).rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -296,39 +288,7 @@ struct AIPanelView: View {
     // MARK: - Composer (Figma 29:4692)
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            attachTimestamp
-            composerBox
-        }
-    }
-
-    /// "Attach timestamp: 0:04 | +" (Figma 83:14716): a split pill that pins
-    /// the playhead's moment to the next note. Clicking again re-attaches
-    /// the current playhead.
-    private var attachTimestamp: some View {
-        Button {
-            attachedTime = currentTime
-            composerFocused = true
-        } label: {
-            HStack(spacing: 0) {
-                Text("Attach timestamp: \(Self.timecode(currentTime))")
-                    .font(Theme.font(.label12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.foreground)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                Rectangle().fill(Theme.border).frame(width: 1, height: 26)
-                Icon(name: "plus", size: 16, fallback: "plus")
-                    .foregroundStyle(Theme.foreground)
-                    .frame(width: 26, height: 26)
-            }
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.border))
-        }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
-        .disabled(chat.running)
-        .tooltip("Attach the playhead's moment to your note so the agent knows exactly where you mean")
+        composerBox
     }
 
     private var composerBox: some View {
@@ -336,7 +296,7 @@ struct AIPanelView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let attachedTime {
                     HStack(spacing: 10) {
-                        Text("Timestamp \(Self.timecode(attachedTime))")
+                        Text("Timestamp \(shortTimecode(attachedTime))")
                             .font(Theme.font(.label12))
                             .monospacedDigit()
                             .foregroundStyle(Theme.foreground)
@@ -377,7 +337,7 @@ struct AIPanelView: View {
                     .buttonStyle(.themed(.primary, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
                     .disabled(!canSend)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Polish (⌘↩)")
+                    .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Send (⌘↩)")
                 }
             }
             .padding(8)
@@ -492,7 +452,7 @@ private struct MessageRow: View {
         case .user:
             VStack(alignment: .leading, spacing: 8) {
                 if let timestamp = message.timestamp {
-                    Text("Timestamp \(AIPanelView.timecode(timestamp))")
+                    Text("Timestamp \(shortTimecode(timestamp))")
                         .font(Theme.font(.label12))
                         .monospacedDigit()
                         .padding(.horizontal, 6)

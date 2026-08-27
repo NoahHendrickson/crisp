@@ -105,9 +105,7 @@ enum SelfTest {
             throw SelfTestError.badExportName(planURL.lastPathComponent)
         }
         // Each export carries a snapshot of the plan that produced it.
-        guard Recording.loadPlanSegments(from: Recording.planSnapshotURL(for: planURL))?.count == 1,
-              recording.files.map(\.title) == ["Original", "Export", "Export 2"],
-              recording.files.last?.zoomCount == 1 else {
+        guard Recording.loadPlanSegments(from: Recording.planSnapshotURL(for: planURL))?.count == 1 else {
             throw SelfTestError.badExportName("missing plan snapshot for \(planURL.lastPathComponent)")
         }
         let planAsset = AVURLAsset(url: planURL)
@@ -136,7 +134,7 @@ enum SelfTest {
         try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
         print("selftest: agent tools ok — validation, annotated frames, preview render, briefing")
 
-        // Optional online leg: exercise the real AI-polish loop (spends a small
+        // Optional online leg: exercise the real AI editor loop (spends a small
         // amount of the user's agent-CLI quota, so only on request).
         if ProcessInfo.processInfo.environment["CRISP_AI_SELFTEST"] == "1" {
             let providers = await AIDirector.detectProviders()
@@ -148,7 +146,7 @@ enum SelfTest {
             let model = ProcessInfo.processInfo.environment["CRISP_AI_MODEL"]
             let effort = ProcessInfo.processInfo.environment["CRISP_AI_EFFORT"]
             let tag = [model, effort].compactMap { $0 }.joined(separator: ", ")
-            print("selftest: AI polish via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
+            print("selftest: AI editor via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
             let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
@@ -170,7 +168,7 @@ enum SelfTest {
                 note: "test run — keep it minimal", segments: auto, onEvent: report
             )
             let polished = outcome.plan
-            print("selftest: AI polish ok — \(auto.count) → \(polished.count) segments; adjustments: \(outcome.adjustments)")
+            print("selftest: AI editor ok — \(auto.count) → \(polished.count) segments; adjustments: \(outcome.adjustments)")
             for seg in polished {
                 print(String(format: "  zoom %.2f–%.2fs @%.1fx steps:%d", seg.start, seg.end, seg.zoom, seg.steps.count))
             }
@@ -181,23 +179,23 @@ enum SelfTest {
             ).plan
             let steps = followUp.reduce(0) { $0 + $1.steps.count }
             guard !restarted else { throw SelfTestError.aiResumeFailed }
-            guard followUp.count <= 1, steps == 0 else { throw SelfTestError.aiIgnoredNote(segments: followUp.count, pans: steps) }
+            guard followUp.count <= 1, steps == 0 else { throw SelfTestError.aiIgnoredNote(segments: followUp.count, steps: steps) }
             print("selftest: AI follow-up ok — \(polished.count) → \(followUp.count) segments, steps: \(steps), resumed")
         }
     }
 
-    /// The offline half of AI Polish: a plan with deliberate rule breaks must
+    /// The offline half of the AI editor: a plan with deliberate rule breaks must
     /// come back normalised with one message per break and its ids intact;
     /// the annotated stills, a preview through the real compositor and the
     /// workspace briefing must all be written.
     private static func checkAgentTools(recording: Recording, meta: RecordingMeta, duration: Double) async throws {
         let keepID = UUID()
-        let panID = UUID()
+        let stepID = UUID()
         let plan = """
         {"segments": [
           {"id": "\(keepID.uuidString)", "start": 0.20, "end": 1.20, "zoom": 3.8,
            "zoomIn": 1.50, "zoomOut": 0.05,
-           "steps": [{"id": "\(panID.uuidString)", "t": 0.60, "zoom": 5.0},
+           "steps": [{"id": "\(stepID.uuidString)", "t": 0.60, "zoom": 5.0},
                      {"t": 0.10, "zoom": 2.0}, {"t": 1.15, "zoom": 2.0}]},
           {"start": 1.25, "end": 1.40, "zoom": 1.8, "steps": []},
           {"start": 1.30, "end": 5.00, "pin": {"x": 9000, "y": 100}}
@@ -205,10 +203,10 @@ enum SelfTest {
         """
         let parsed = try AIDirector.parsePlan(Data(plan.utf8), duration: duration, meta: meta)
         guard parsed.declared == 3 else { throw SelfTestError.agentTools("declared \(parsed.declared)") }
-        guard parsed.segments.first?.id == keepID, parsed.segments.first?.steps.contains(where: { $0.id == panID }) == true else {
+        guard parsed.segments.first?.id == keepID, parsed.segments.first?.steps.contains(where: { $0.id == stepID }) == true else {
             throw SelfTestError.agentTools("ids not preserved")
         }
-        guard parsed.segments[0].zoom == 3.0, parsed.segments[0].steps.first(where: { $0.id == panID })?.zoom == 3.0 else {
+        guard parsed.segments[0].zoom == 3.0, parsed.segments[0].steps.first(where: { $0.id == stepID })?.zoom == 3.0 else {
             throw SelfTestError.agentTools("zoom not clamped")
         }
         // The early step pulled to the hold start; the late one dropped.
@@ -494,7 +492,7 @@ enum SelfTest {
         case badExportName(String)
         case noAIProvider
         case aiResumeFailed
-        case aiIgnoredNote(segments: Int, pans: Int)
+        case aiIgnoredNote(segments: Int, steps: Int)
         case agentTools(String)
     }
 }

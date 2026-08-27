@@ -46,6 +46,12 @@ extension EditorView {
         min(max(0, Double(x / max(w, 1)) * duration), duration)
     }
 
+    /// A hold's bar on a track: its x and width (at least 6pt wide).
+    func holdBounds(_ seg: ZoomSegment, width w: CGFloat) -> (x: CGFloat, width: CGFloat) {
+        let holdX = x(of: seg.start, width: w)
+        return (holdX, max(6, x(of: min(seg.end, duration), width: w) - holdX))
+    }
+
     // MARK: - Timeline
 
     var timeline: some View {
@@ -117,7 +123,7 @@ extension EditorView {
                 }
             }
             .overlay(alignment: .trailing) {
-                Text(timecodeShort(duration))
+                Text(shortTimecode(duration))
                     .font(Theme.font(.label12))
                     .monospacedDigit()
                     .foregroundStyle(Theme.foreground)
@@ -210,8 +216,7 @@ extension EditorView {
     /// where a step changes it, and grips on both edges.
     @ViewBuilder
     func zoomBar(for seg: ZoomSegment, width w: CGFloat) -> some View {
-        let holdX = x(of: seg.start, width: w)
-        let holdW = max(6, x(of: min(seg.end, duration), width: w) - holdX)
+        let (holdX, holdW) = holdBounds(seg, width: w)
         let lit = isLit(seg)
 
         bar(Theme.zoomBar)
@@ -266,8 +271,7 @@ extension EditorView {
     /// A baseline zoom that the current plan no longer has: a dashed outline
     /// over its old hold, shown only while comparing.
     func removedBar(for seg: ZoomSegment, width w: CGFloat) -> some View {
-        let holdX = x(of: seg.start, width: w)
-        let holdW = max(6, x(of: min(seg.end, duration), width: w) - holdX)
+        let (holdX, holdW) = holdBounds(seg, width: w)
         return RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
             .strokeBorder(Theme.destructive.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
             .frame(width: holdW, height: Self.rowHeight)
@@ -312,10 +316,8 @@ extension EditorView {
     /// start of each following stretch and an orange band for each pin.
     @ViewBuilder
     func framingSpan(for seg: ZoomSegment, width w: CGFloat) -> some View {
-        let holdX = x(of: seg.start, width: w)
-        let holdW = max(6, x(of: min(seg.end, duration), width: w) - holdX)
+        let (holdX, holdW) = holdBounds(seg, width: w)
         let lit = isLit(seg)
-        let glyphY = (Self.rowHeight - Self.barGlyphSize) / 2
         let windows = pinWindows(for: seg)
 
         RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
@@ -326,21 +328,13 @@ extension EditorView {
 
         ForEach(followStretches(for: seg, windows: windows)) { stretch in
             let fromX = x(of: stretch.from, width: w)
-            let stretchW = max(0, x(of: stretch.until, width: w) - fromX)
-            Color.clear
-                .frame(width: stretchW, height: Self.rowHeight)
-                .overlay(alignment: .leading) {
-                    if stretchW >= Self.barGlyphSize + 14 {
-                        Icon(name: "cursor-click", size: Self.barGlyphSize, fallback: "cursorarrow.click")
-                            .foregroundStyle(Theme.foreground)
-                            .padding(.leading, 7)
-                    }
-                }
-                .contentShape(Rectangle())
-                .offset(x: fromX)
-                .tooltip(windows.isEmpty
-                      ? "The camera follows the cursor through this zoom — Pin viewport holds it still"
-                      : "The camera follows the cursor here")
+            glyphSpan(
+                x: fromX, width: max(0, x(of: stretch.until, width: w) - fromX),
+                icon: "cursor-click", fallback: "cursorarrow.click",
+                help: windows.isEmpty
+                    ? "The camera follows the cursor through this zoom — Pin viewport holds it still"
+                    : "The camera follows the cursor here"
+            )
         }
 
         ForEach(windows, id: \.id) { window in
@@ -362,41 +356,47 @@ extension EditorView {
             .opacity(lit ? 1 : 0.4)
             .allowsHitTesting(false)
 
+        glyphSpan(
+            x: fromX, width: bandW,
+            icon: "map-pin-simple-area", fallback: "mappin.and.ellipse",
+            help: open
+                ? "Viewport pinned from \(shortTimecode(window.from)) to the end of this zoom — scrub ahead and Unpin where the camera should follow again; drag the crop box to move the pinned spot"
+                : "Viewport pinned \(shortTimecode(window.from))–\(shortTimecode(window.until)) — drag the edges to change when; drag the crop box to move the pinned spot"
+        )
+
+        ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+            let target: TimelineDrag.Target = edge == .leading
+                ? .pinStart(segment: seg.id, pin: window.id)
+                : .pinEnd(segment: seg.id, pin: window.id)
+            TimelineEdgeHandle(
+                color: Theme.pinBar,
+                dragging: timelineDrag?.target == target,
+                onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                onEnd: { timelineDrag = nil }
+            )
+            .offset(x: (edge == .leading ? fromX : fromX + bandW) - TimelineEdgeHandle.width / 2)
+            .tooltip(edge == .leading
+                  ? "Pin starts here — drag to change when"
+                  : "Pin releases here — drag to change when the camera follows the cursor again")
+            .zIndex(3)
+        }
+    }
+
+    /// A stretch on the framing row that carries a tooltip and, when wide
+    /// enough, a glyph at its start. The press falls through to the scrub.
+    func glyphSpan(x: CGFloat, width: CGFloat, icon: String, fallback: String, help: String) -> some View {
         Color.clear
-            .frame(width: bandW, height: Self.rowHeight)
+            .frame(width: width, height: Self.rowHeight)
             .overlay(alignment: .leading) {
-                if bandW >= Self.barGlyphSize + 14 {
-                    Icon(name: "map-pin-simple-area", size: Self.barGlyphSize, fallback: "mappin.and.ellipse")
+                if width >= Self.barGlyphSize + 14 {
+                    Icon(name: icon, size: Self.barGlyphSize, fallback: fallback)
                         .foregroundStyle(Theme.foreground)
                         .padding(.leading, 7)
                 }
             }
             .contentShape(Rectangle())
-            .offset(x: fromX)
-            .tooltip(open
-                  ? "Viewport pinned from \(timecodeShort(window.from)) to the end of this zoom — scrub ahead and Unpin where the camera should follow again; drag the crop box to move the pinned spot"
-                  : "Viewport pinned \(timecodeShort(window.from))–\(timecodeShort(window.until)) — drag the edges to change when; drag the crop box to move the pinned spot")
-
-        let startTarget: TimelineDrag.Target = .pinStart(segment: seg.id, pin: window.id)
-        let endTarget: TimelineDrag.Target = .pinEnd(segment: seg.id, pin: window.id)
-        TimelineEdgeHandle(
-            color: Theme.pinBar,
-            dragging: timelineDrag?.target == startTarget,
-            onDrag: { dx in dragKeyframe(startTarget, translation: dx, width: w) },
-            onEnd: { timelineDrag = nil }
-        )
-        .offset(x: fromX - TimelineEdgeHandle.width / 2)
-        .tooltip("Pin starts here — drag to change when")
-        .zIndex(3)
-        TimelineEdgeHandle(
-            color: Theme.pinBar,
-            dragging: timelineDrag?.target == endTarget,
-            onDrag: { dx in dragKeyframe(endTarget, translation: dx, width: w) },
-            onEnd: { timelineDrag = nil }
-        )
-        .offset(x: fromX + bandW - TimelineEdgeHandle.width / 2)
-        .tooltip("Pin releases here — drag to change when the camera follows the cursor again")
-        .zIndex(3)
+            .offset(x: x)
+            .tooltip(help)
     }
 
     // MARK: - Playhead
@@ -454,7 +454,7 @@ extension EditorView {
             let windows = pinWindows(for: seg)
             guard let wi = windows.firstIndex(where: { $0.id == pinID }) else { return }
             let floor = wi > 0 ? windows[wi - 1].until : seg.start
-            let from = min(max(t, seg.start, floor), max(seg.start, windows[wi].until - 0.1))
+            let from = min(max(t, floor), max(floor, windows[wi].until - 0.1))
             // Back at the hold's start means "from the start" — store nothing.
             segments[at.seg].pins[at.pin].from = from <= seg.start + 0.001 ? nil : from
         case .pinEnd(let segID, let pinID):
@@ -463,7 +463,7 @@ extension EditorView {
             let windows = pinWindows(for: seg)
             guard let wi = windows.firstIndex(where: { $0.id == pinID }) else { return }
             let ceiling = wi + 1 < windows.count ? windows[wi + 1].from : seg.end
-            let until = max(min(t, seg.end, ceiling), min(seg.end, windows[wi].from + 0.1))
+            let until = max(min(t, ceiling), min(ceiling, windows[wi].from + 0.1))
             // At the hold's end the pin is open again: held until released.
             segments[at.seg].pins[at.pin].until = until >= seg.end - 0.001 ? nil : until
         }

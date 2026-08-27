@@ -55,7 +55,7 @@ struct EditorView: View {
     @State var segments: [ZoomSegment] = []
     /// A keyframe being dragged along the timeline, with the time it had
     /// when the drag began so it tracks the pointer instead of jumping to it.
-    struct TimelineDrag: Equatable {
+    struct TimelineDrag {
         enum Target: Equatable {
             case zoomStart(UUID), zoomEnd(UUID)
             case pinStart(segment: UUID, pin: UUID), pinEnd(segment: UUID, pin: UUID)
@@ -133,17 +133,9 @@ struct EditorView: View {
                             recording: recording,
                             meta: meta,
                             duration: duration,
-                            currentTime: currentTime,
                             attachedTime: $aiAttachedTime,
                             segments: segments,
-                            onApply: { plan in
-                                // A historical Compare must not outlive the plan it
-                                // was comparing; from here on compare shows the plan
-                                // this apply replaced vs. the live segments.
-                                compareTarget = nil
-                                compareBaseline = segments
-                                segments = plan
-                            },
+                            onApply: { loadPlan($0) },
                             onCompare: { before, after in
                                 compareBaseline = before
                                 compareTarget = after
@@ -157,7 +149,6 @@ struct EditorView: View {
         }
         .font(Theme.font(.body12))
         .foregroundStyle(Theme.foreground)
-        .groupBoxStyle(.card)
         .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 688)
         .background(Theme.background)
         .background(WindowChrome())
@@ -374,7 +365,7 @@ struct EditorView: View {
         var cx = Binding<Double>.constant(camera.center.x)
         var cy = Binding<Double>.constant(camera.center.y)
         guard currentTime >= span.arrive - Self.keyframeSlop, currentTime <= span.end + Self.keyframeSlop,
-              !isMidStep(in: seg) else {
+              let zoom = levelBinding(in: index) else {
             return BoxTarget(cx: cx, cy: cy, zoom: .constant(camera.zoom), zoomEditable: false, movable: false)
         }
         var movable = false
@@ -389,10 +380,7 @@ struct EditorView: View {
                 set: { v in updatePin(pinID, in: index) { $0.y = v } }
             )
         }
-        if let stepIndex = activeStepIndex(in: seg) {
-            return BoxTarget(cx: cx, cy: cy, zoom: $segments[index].steps[stepIndex].zoom, zoomEditable: true, movable: movable)
-        }
-        return BoxTarget(cx: cx, cy: cy, zoom: $segments[index].zoom, zoomEditable: true, movable: movable)
+        return BoxTarget(cx: cx, cy: cy, zoom: zoom, zoomEditable: true, movable: movable)
     }
 
     /// The zoom whose motion window (ramps included) contains the playhead.
@@ -451,24 +439,6 @@ struct EditorView: View {
             .max { seg.steps[$0].t < seg.steps[$1].t }
     }
 
-    // MARK: - Helpers
-
-    func seek(to t: Double) {
-        player.seek(
-            to: CMTime(seconds: t, preferredTimescale: 600),
-            toleranceBefore: .zero, toleranceAfter: .zero
-        )
-    }
-
-    func timecode(_ t: Double) -> String {
-        let total = max(0, t)
-        return String(format: "%d:%05.2f", Int(total) / 60, total.truncatingRemainder(dividingBy: 60))
-    }
-
-    func timecodeShort(_ t: Double) -> String {
-        let total = Int(max(0, t).rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
 }
 
 /// Holds the editor window so we can grow/shrink it without moving the titlebar.

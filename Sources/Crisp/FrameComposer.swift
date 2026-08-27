@@ -65,9 +65,8 @@ final class FrameComposer: FrameComposing {
     static func cursorPosition(samples: [CursorSample], at t: Double) -> (x: Double, y: Double, kind: CursorKind)? {
         guard let first = samples.first else { return nil }
         if t <= first.t { return (first.x, first.y, first.kind ?? .arrow) }
-        guard let last = samples.last, t < last.t else {
-            return samples.last.map { ($0.x, $0.y, $0.kind ?? .arrow) }
-        }
+        let last = samples[samples.count - 1]
+        if t >= last.t { return (last.x, last.y, last.kind ?? .arrow) }
         var lo = 0
         var hi = samples.count - 1
         while hi - lo > 1 {

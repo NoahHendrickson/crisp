@@ -733,24 +733,4 @@ final class AppModel: ObservableObject {
         recordings = Recording.loadAll()
     }
 
-    // MARK: Per-file (export version) actions
-
-    func open(_ file: RecordingFile) {
-        NSWorkspace.shared.open(file.url)
-    }
-
-    func reveal(_ file: RecordingFile) {
-        NSWorkspace.shared.activateFileViewerSelecting([file.url])
-    }
-
-    /// Trashes one export (and its plan snapshot). The master is only removed
-    /// with the whole recording via `delete(_:)`.
-    func delete(_ file: RecordingFile) {
-        guard !file.isMaster else { return }
-        try? FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
-        if let snapshot = file.planSnapshotURL {
-            try? FileManager.default.trashItem(at: snapshot, resultingItemURL: nil)
-        }
-        recordings = Recording.loadAll()
-    }
 }

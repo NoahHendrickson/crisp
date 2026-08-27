@@ -1,18 +1,18 @@
 import SwiftUI
 
-/// Editable crop rectangle drawn over the full-frame preview: shows where a
-/// selected zoom (or pan) will land. Drag the box to re-center, drag a corner
-/// to change the zoom level. Coordinates are master-video pixels; the view
+/// Crop rectangle drawn over the full-frame preview: where the camera is at
+/// the playhead. Drag the box to move a pinned viewport, drag a corner to
+/// change the zoom level. Coordinates are master-video pixels; the view
 /// maps them into the letterboxed video rect of the player.
 struct ZoomFrameOverlay: View {
     let pixelWidth: Double
     let pixelHeight: Double
     let zoomRange: ClosedRange<Double>
-    /// False when only the center may change: no corner handles.
+    /// Whether the corners may change the level.
     let zoomEditable: Bool
-    /// False when the box only mirrors the camera at the playhead (e.g. the
-    /// playhead is outside the selected zoom): no drag, no corner handles.
-    var editable: Bool = true
+    /// Whether the box may be dragged — only while a pin applies; while the
+    /// camera follows the cursor the box just mirrors it.
+    let editable: Bool
     @Binding var cx: Double
     @Binding var cy: Double
     @Binding var zoom: Double
@@ -73,7 +73,7 @@ struct ZoomFrameOverlay: View {
                                 x: corner.point(in: box).x - handleSize / 2,
                                 y: corner.point(in: box).y - handleSize / 2
                             )
-                            .gesture(resizeGesture(corner: corner, video: video, scale: scale))
+                            .gesture(resizeGesture(video: video, scale: scale))
                     }
                 }
             }
@@ -107,14 +107,10 @@ struct ZoomFrameOverlay: View {
         )
     }
 
-    /// Mirrors ZoomPlanner.clampedCenter so the box never leaves the frame.
+    /// The planner's clamp, so the box never leaves the frame and matches
+    /// what renders.
     private func clampedCenter(cx: Double, cy: Double, zoom: Double) -> CGPoint {
-        let halfW = pixelWidth / zoom / 2
-        let halfH = pixelHeight / zoom / 2
-        return CGPoint(
-            x: min(max(cx, halfW), pixelWidth - halfW),
-            y: min(max(cy, halfH), pixelHeight - halfH)
-        )
+        ZoomPlanner.clampedCenter(CGPoint(x: cx, y: cy), zoom: zoom, width: pixelWidth, height: pixelHeight)
     }
 
     // MARK: - Gestures
@@ -122,11 +118,11 @@ struct ZoomFrameOverlay: View {
     private func moveGesture(scale: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                if dragStart == nil {
+                let start = dragStart ?? {
                     let c = clampedCenter(cx: cx, cy: cy, zoom: zoom)
-                    dragStart = (Double(c.x), Double(c.y))
-                }
-                guard let start = dragStart else { return }
+                    return (cx: Double(c.x), cy: Double(c.y))
+                }()
+                dragStart = start
                 let c = clampedCenter(
                     cx: start.cx + value.translation.width / scale,
                     cy: start.cy + value.translation.height / scale,
@@ -140,11 +136,12 @@ struct ZoomFrameOverlay: View {
 
     /// Dragging a corner scales the box about its center; the box's aspect
     /// ratio is fixed by the video, so only the zoom level changes.
-    private func resizeGesture(corner: Corner, video: CGRect, scale: CGFloat) -> some Gesture {
+    private func resizeGesture(video: CGRect, scale: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .named(Self.space))
             .onChanged { value in
-                if resizeStartZoom == nil { resizeStartZoom = zoom }
-                let c = clampedCenter(cx: cx, cy: cy, zoom: resizeStartZoom ?? zoom)
+                let startZoom = resizeStartZoom ?? zoom
+                resizeStartZoom = startZoom
+                let c = clampedCenter(cx: cx, cy: cy, zoom: startZoom)
                 let centerView = CGPoint(x: video.minX + c.x * scale, y: video.minY + c.y * scale)
                 // Pointer distance from the center along x and y → candidate half sizes.
                 let halfW = abs(value.location.x - centerView.x)

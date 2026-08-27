@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 import AVFoundation
 import CoreImage
 import VideoToolbox

@@ -6,7 +6,7 @@ import CoreText
 import ImageIO
 import UniformTypeIdentifiers
 
-/// The agent-facing side of AI Polish: the annotated stills an agent is
+/// The agent-facing side of the AI editor: the annotated stills an agent is
 /// shown, the previews it can render of its own plan, and the `./crisp`
 /// command line it runs from its workspace, which re-enters this binary as
 ///
@@ -404,11 +404,9 @@ enum AgentTools {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         // Work in top-left video coordinates from here on.
         ctx.translateBy(x: 0, y: CGFloat(h))
-        ctx.scaleBy(x: 1, y: -1)
-        let s = Double(w) / videoW * (videoW / Double(image.width))  // image px → output px
+        ctx.scaleBy(x: 1, y: -1)  // image px → output px
         let v = Double(w) / videoW                                   // video px → output px
         func P(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x * v, y: y * v) }
-        _ = s
 
         if grid {
             let step: Double = videoW > 3000 ? 500 : (videoW > 1600 ? 200 : 100)

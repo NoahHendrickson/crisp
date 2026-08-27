@@ -4,15 +4,15 @@ import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
 
-/// "AI Polish": hand the current zoom plan + click log + annotated frames
+/// The AI editor: hand the current zoom plan + click log + annotated frames
 /// from the video to a locally-installed, subscription-authenticated agent
 /// CLI (Claude Code or Codex) — with a standing brief and `./crisp` tools to
 /// see any moment, preview its own plan and validate it — and get back a
 /// touched-up plan: better timing, fewer redundant zooms, the right levels.
 ///
 /// No API keys, no OAuth: the CLIs bring the user's existing sign-in.
-struct AIProvider: Identifiable, Equatable, Hashable {
-    enum Kind: String, CaseIterable {
+struct AIProvider: Identifiable, Equatable {
+    enum Kind: String {
         case claude = "Claude"
         case codex = "Codex"
     }
@@ -30,7 +30,7 @@ struct AIProvider: Identifiable, Equatable, Hashable {
 }
 
 /// A model choice for one provider. `id` is what's passed to the CLI.
-struct AIModel: Identifiable, Equatable, Hashable {
+struct AIModel: Identifiable, Equatable {
     let id: String
     let label: String
     /// Reasoning-effort levels this model accepts, lowest first.
@@ -263,7 +263,7 @@ enum AIDirector {
                     try? AgentTools.writeJPEG(annotated, to: workspace.appendingPathComponent(name))
                     frames.append(AgentTools.Frame(file: name, t: t, label: "the moment the user's note is about"))
                 }
-                let covering = segments.enumerated().first { index, seg in
+                let covering = segments.enumerated().first { _, seg in
                     let span = planner.motionSpan(for: seg, duration: duration)
                     return t >= span.moveStart && t <= span.outEnd
                 }
@@ -273,7 +273,7 @@ enum AIDirector {
                 } ?? "at full frame, not inside any zoom"
                 moment = String(
                     format: "The note is about the moment at %.2fs (%@). The camera there is %@, zoom %.2f× centred on (%.0f, %.0f). See %@ — an annotated still of exactly that frame.",
-                    t, AIDirector.shortTimecode(t), state, camera.zoom, camera.center.x, camera.center.y,
+                    t, shortTimecode(t), state, camera.zoom, camera.center.x, camera.center.y,
                     workspace.appendingPathComponent(name).path
                 )
             }
@@ -289,7 +289,7 @@ enum AIDirector {
             if !issues.isEmpty {
                 // Give the agent one shot at fixing its own plan; `./crisp
                 // validate` prints exactly these checks, so it can iterate.
-                AppModel.log("AI polish: plan needs fixes, asking the agent: \(issues.joined(separator: " | "))")
+                AppModel.log("AI editor: plan needs fixes, asking the agent: \(issues.joined(separator: " | "))")
                 onEvent(.activity(.other, "Fixing \(issues.count) rule issue\(issues.count == 1 ? "" : "s") in the plan"))
                 try await runTurn(prompt: AIDirector.fixupPrompt(issues: issues), onEvent: onEvent)
                 (parsed, issues) = planState(planURL)
@@ -297,7 +297,7 @@ enum AIDirector {
             guard let parsed else { throw DirectorError.unparseableOutput(issues.first ?? "unknown problem") }
             guard !parsed.segments.isEmpty || parsed.declared == 0 else { throw DirectorError.emptyPlan }
             let tag = [provider.kind.rawValue, model, effort].compactMap { $0 }.joined(separator: " / ")
-            AppModel.log("AI polish (\(tag)): \(segments.count) → \(parsed.segments.count) segments; \(issues.count) adjustment(s)")
+            AppModel.log("AI editor (\(tag)): \(segments.count) → \(parsed.segments.count) segments; \(issues.count) adjustment(s)")
             return Outcome(plan: parsed.segments, adjustments: issues)
         }
 
@@ -308,8 +308,7 @@ enum AIDirector {
             var retriedFresh = false
             while true {
                 let resuming = started
-                let text = resuming ? prompt : prompt
-                try Data(text.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
+                try Data(prompt.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
 
                 var sawEvent = false
                 var errorMessage: String?
@@ -330,7 +329,7 @@ enum AIDirector {
                 guard let failure else { break }
 
                 if resuming && !sawEvent && !retriedFresh && !(failure is CancellationError) {
-                    AppModel.log("AI polish: resume failed, starting a fresh session: \(failure.localizedDescription)")
+                    AppModel.log("AI editor: resume failed, starting a fresh session: \(failure.localizedDescription)")
                     retriedFresh = true
                     started = false
                     sessionID = nil
@@ -353,7 +352,7 @@ enum AIDirector {
                 let parsed = try AIDirector.parsePlan(data, duration: duration, meta: meta)
                 return (parsed, parsed.issues)
             } catch {
-                AppModel.log("AI polish: bad plan.json: \(error.localizedDescription)")
+                AppModel.log("AI editor: bad plan.json: \(error.localizedDescription)")
                 return (nil, ["plan.json could not be read: \(error.localizedDescription)"])
             }
         }
@@ -499,7 +498,7 @@ enum AIDirector {
         let zoomOut = String(format: "%.2f", config.zoomOutDuration)
         let stepEase = String(format: "%.1f", config.stepDuration)
         return """
-    # Crisp AI Polish — director's brief
+    # Crisp AI editor — director's brief
 
     You are the motion director for a screen recording made with Crisp. Crisp records the
     screen and every click, then plays it back through a virtual camera that zooms into the
@@ -512,7 +511,7 @@ enum AIDirector {
     ## What is in this directory
 
     - `context.json` — everything known about the video: size, duration, every click and
-      drag, scroll bursts, click clusters (the actions the automatic plan reasoned about), a
+      drag, click clusters (the actions the automatic plan reasoned about), a
       sampled cursor path, the current plan, its derived timing, and the rules below as data.
     - `frame_N.jpg` — annotated stills: a coordinate grid in video pixels, rings on the
       clicks within ±1.5 s (with times), a blue dot for the cursor, and a green rectangle
@@ -526,6 +525,8 @@ enum AIDirector {
       - `./crisp validate` — checks `plan.json` against the app's rules and prints the
         derived timing of every zoom and step. The app runs the same checks on apply and
         clamps anything you leave wrong, so finish only when it prints `OK`.
+      - `./crisp path [from] [to]` — the camera over time under `plan.json`, as numbers
+        (t, zoom, centre, speed): where the follower looks, when a still isn't enough.
 
     ## How the camera works
 
@@ -649,24 +650,6 @@ enum AIDirector {
             }
         }
 
-        // Scroll bursts: scroll events closer than 0.8s, with where they happened.
-        var scrollBursts: [[String: Any]] = []
-        var burst: [MouseEvent] = []
-        func flushBurst() {
-            guard !burst.isEmpty else { return }
-            scrollBursts.append([
-                "start": round2(burst[0].t), "end": round2(burst[burst.count - 1].t), "count": burst.count,
-                "x": round2(burst.map(\.x).reduce(0, +) / Double(burst.count)),
-                "y": round2(burst.map(\.y).reduce(0, +) / Double(burst.count)),
-            ])
-            burst = []
-        }
-        for event in meta.events where event.kind == .scroll {
-            if let last = burst.last, event.t - last.t > 0.8 { flushBurst() }
-            burst.append(event)
-        }
-        flushBurst()
-
         let clusters = AgentTools.clickClusters(meta: meta, duration: duration, planner: planner).map { cluster -> [String: Any] in
             let covering = segments.firstIndex { $0.start - 0.5 <= cluster.start && cluster.end <= $0.end + 0.5 }
             return ["start": round2(cluster.start), "end": round2(cluster.end), "count": cluster.count,
@@ -709,7 +692,6 @@ enum AIDirector {
             ],
             "clicks": clicks,
             "drags": drags,
-            "scrollBursts": scrollBursts,
             "clickClusters": clusters,
             "cursorPath": ["format": "[t, x, y] every \(round2(step))s", "points": cursorPath],
             "currentPlan": plan,
@@ -724,6 +706,7 @@ enum AIDirector {
                 "frame": "./crisp frame <seconds> [--raw] — annotated still at any time",
                 "preview": "./crisp preview <seconds> — the export's look at that time under plan.json",
                 "validate": "./crisp validate — rule check + derived timing; finish only on OK",
+                "path": "./crisp path [from] [to] [--step s] — the camera over time under plan.json (t, zoom, centre, speed)",
             ],
             "frames": frames.map { ["file": $0.file, "atSeconds": round2($0.t), "label": $0.label] },
         ]
@@ -799,11 +782,6 @@ enum AIDirector {
     }
 
     // MARK: - Prompts
-
-    static func shortTimecode(_ t: Double) -> String {
-        let total = Int(max(0, t).rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
 
     private static func firstPrompt(note: String, moment: String?, frames: [AgentTools.Frame], workspace: URL) -> String {
         let frameList = frames
@@ -927,8 +905,6 @@ enum AIDirector {
     /// Clamp everything into legal ranges, drop degenerate zooms, enforce
     /// order — and say so, per item, in words the agent can act on.
     private static func validate(_ dto: PlanDTO, duration: Double, meta: RecordingMeta) -> ParsedPlan {
-        let w = Double(meta.pixelWidth)
-        let h = Double(meta.pixelHeight)
         var result: [ZoomSegment] = []
         var issues: [String] = []
         func f(_ x: Double) -> String { String(format: "%.2f", x) }
@@ -1187,7 +1163,6 @@ enum AIDirector {
         case cliFailed(String)
         case timedOut
         case unparseableOutput(String)
-        case noPlanWritten
         case emptyPlan
 
         var errorDescription: String? {
@@ -1198,8 +1173,6 @@ enum AIDirector {
                 return "The AI tool took too long and was stopped — your zooms are unchanged."
             case .unparseableOutput(let detail):
                 return "The AI wrote an invalid plan.json (\(detail)) — your zooms are unchanged."
-            case .noPlanWritten:
-                return "The AI removed the plan file — your zooms are unchanged."
             case .emptyPlan:
                 return "The AI returned an empty plan — kept your current zooms."
             }

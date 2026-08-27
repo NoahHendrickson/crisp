@@ -48,7 +48,6 @@ final class TooltipState: ObservableObject {
 struct TooltipSpec {
     let anchor: Anchor<CGRect>
     let text: String
-    let edge: VerticalEdge
 }
 
 struct TooltipPreference: PreferenceKey {
@@ -73,7 +72,6 @@ extension EnvironmentValues {
 /// help only) when no `.tooltipHost()` is above the view.
 private struct TooltipModifier: ViewModifier {
     let text: String
-    let edge: VerticalEdge
     @Environment(\.tooltipState) private var state
     @State private var id = UUID().uuidString
 
@@ -83,16 +81,16 @@ private struct TooltipModifier: ViewModifier {
             .onHover { state?.hover(id, entering: $0) }
             .onDisappear { if state?.active == id { state?.hide() } }
             .anchorPreference(key: TooltipPreference.self, value: .bounds) {
-                [id: TooltipSpec(anchor: $0, text: text, edge: edge)]
+                [id: TooltipSpec(anchor: $0, text: text)]
             }
     }
 }
 
 extension View {
-    /// Themed replacement for `.help(_:)`. `edge` is where the bubble prefers
-    /// to sit; it flips when there is no room.
-    func tooltip(_ text: String, edge: VerticalEdge = .bottom) -> some View {
-        modifier(TooltipModifier(text: text, edge: edge))
+    /// Themed replacement for `.help(_:)`. The bubble sits below the view,
+    /// or above it when there is no room.
+    func tooltip(_ text: String) -> some View {
+        modifier(TooltipModifier(text: text))
     }
 }
 
@@ -158,9 +156,7 @@ private struct TooltipHost: ViewModifier {
                 GeometryReader { geo in
                     if let id = state.active, let spec = specs[id] {
                         let rect = geo[spec.anchor]
-                        let below = spec.edge == .bottom
-                            ? rect.maxY + Self.gap + 60 < geo.size.height
-                            : rect.minY - Self.gap - 60 < 0
+                        let below = rect.maxY + Self.gap + 60 < geo.size.height
                         ZStack(alignment: .topLeading) {
                             Color.clear
                             TooltipBubble(text: spec.text)
