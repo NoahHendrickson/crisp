@@ -86,29 +86,44 @@ struct ZoomPlanner {
 
     // MARK: - Automatic plan
 
-    /// Auto-generate editable zoom segments from the click log: one segment per
-    /// click cluster. `start...end` is the fully-zoomed hold window; the eased
-    /// zoom-in/out transitions and the framing are added by `keyframes`.
-    func segments(events: [MouseEvent], duration: Double) -> [ZoomSegment] {
-        let clicks = events.filter { $0.kind == .leftDown || $0.kind == .rightDown }
-        guard !clicks.isEmpty else { return [] }
+    /// One action in the click log: clicks closer together than
+    /// `clusterGap`. The automatic plan gives each one a zoom; the agent's
+    /// context and stills list them.
+    struct ClickCluster {
+        var start: Double
+        var end: Double
+        var count: Int
+        var center: CGPoint
+    }
 
-        var clusters: [[MouseEvent]] = []
+    func clickClusters(_ events: [MouseEvent]) -> [ClickCluster] {
+        var groups: [[MouseEvent]] = []
         var current: [MouseEvent] = []
-        for click in clicks {
+        for click in events where click.kind == .leftDown || click.kind == .rightDown {
             if let last = current.last, click.t - last.t > config.clusterGap {
-                clusters.append(current)
+                groups.append(current)
                 current = []
             }
             current.append(click)
         }
-        if !current.isEmpty { clusters.append(current) }
+        if !current.isEmpty { groups.append(current) }
+        return groups.map { group in
+            ClickCluster(
+                start: group[0].t, end: group[group.count - 1].t, count: group.count,
+                center: CGPoint(x: group.map(\.x).reduce(0, +) / Double(group.count),
+                                y: group.map(\.y).reduce(0, +) / Double(group.count))
+            )
+        }
+    }
 
-        return clusters.compactMap { cluster in
-            let start = cluster[0].t
-            let end = min(duration, cluster[cluster.count - 1].t + config.holdAfter)
-            guard end > start + 0.05 else { return nil }
-            return ZoomSegment(start: start, end: end, zoom: config.zoomLevel)
+    /// Auto-generate editable zoom segments from the click log: one per
+    /// click cluster. `start...end` is the fully-zoomed hold window; the
+    /// eased zoom-in/out transitions and the framing are added by `keyframes`.
+    func segments(events: [MouseEvent], duration: Double) -> [ZoomSegment] {
+        clickClusters(events).compactMap { cluster in
+            let end = min(duration, cluster.end + config.holdAfter)
+            guard end > cluster.start + 0.05 else { return nil }
+            return ZoomSegment(start: cluster.start, end: end, zoom: config.zoomLevel)
         }
     }
 
@@ -305,7 +320,7 @@ struct ZoomPlanner {
         var velocity = CGPoint.zero
         var aim = frameCenter
         var target = frameCenter
-        var clickTarget: (point: CGPoint, until: Double)?
+        var held: HeldClick?
         var nextClick = 0
         var inWindow = false
         var levelIndex = 0
@@ -317,7 +332,7 @@ struct ZoomPlanner {
             guard let state = rampState(at: time, windows: windows, zoom: zoom), zoom > 1.0001 || state.progress > 0 else {
                 if inWindow {
                     out.append(Keyframe(t: time, camera: fullFrame))
-                    clickTarget = nil
+                    held = nil
                 }
                 inWindow = false
                 t += dt
@@ -328,54 +343,21 @@ struct ZoomPlanner {
             if !inWindow {
                 // Pin full frame right before the ramp so the previous
                 // full-frame stretch doesn't drift toward this key.
-                let pin = time - dt
-                if let last = out.last, pin > last.t + 1e-6 {
-                    out.append(Keyframe(t: pin, camera: fullFrame))
+                let before = time - dt
+                if let last = out.last, before > last.t + 1e-6 {
+                    out.append(Keyframe(t: before, camera: fullFrame))
                 }
-                // Open on the action: the pin if it applies from the start,
-                // else the first click coming up, else the cursor.
-                var opening = frameCenter
-                if let pin = state.pin {
-                    opening = pin
-                } else if nextClick < clicks.count, clicks[nextClick].t <= time + config.leadIn + config.clickLookAhead {
-                    opening = CGPoint(x: clicks[nextClick].x, y: clicks[nextClick].y)
-                } else if let p = FrameComposer.cursorPosition(samples: samples, at: time + config.leadIn) {
-                    opening = CGPoint(x: p.x, y: p.y)
-                }
-                center = clampedCenter(opening, zoom: holdZoom)
+                center = clampedCenter(openingTarget(at: time, pin: state.pin, nextClick: nextClick), zoom: holdZoom)
                 aim = center
                 target = center
                 velocity = .zero
             }
 
-            // Raw target: the pin while it applies; else an upcoming click,
-            // else the cursor a moment ahead when it has strayed out of the
-            // dead zone.
-            if state.pin == nil, nextClick < clicks.count, clicks[nextClick].t <= time + config.clickLookAhead {
-                let click = clicks[nextClick]
-                clickTarget = (CGPoint(x: click.x, y: click.y), click.t + config.clickHold)
-                nextClick += 1
-            }
-            if let pin = state.pin {
-                target = pin
-                clickTarget = nil
-            } else if let held = clickTarget, time <= held.until {
-                target = held.point
-            } else {
-                clickTarget = nil
-                if let p = FrameComposer.cursorPosition(samples: samples, at: time + config.cursorLookAhead) {
-                    let deadW = width / holdZoom / 2 * config.deadZone
-                    let deadH = height / holdZoom / 2 * config.deadZone
-                    let settleW = width / holdZoom / 2 * config.settleZone
-                    let settleH = height / holdZoom / 2 * config.settleZone
-                    var tx = target.x
-                    var ty = target.y
-                    if p.x > center.x + deadW { tx = p.x - settleW } else if p.x < center.x - deadW { tx = p.x + settleW }
-                    if p.y > center.y + deadH { ty = p.y - settleH } else if p.y < center.y - deadH { ty = p.y + settleH }
-                    target = CGPoint(x: tx, y: ty)
-                }
-            }
-            target = clampedCenter(target, zoom: holdZoom)
+            target = clampedCenter(
+                selectTarget(at: time, pin: state.pin, holdZoom: holdZoom, center: center, previous: target,
+                             held: &held, nextClick: &nextClick),
+                zoom: holdZoom
+            )
 
             // Ease the target into the aim, then spring the centre to the aim.
             aim.x += (target.x - aim.x) * aimBlend
@@ -420,6 +402,64 @@ struct ZoomPlanner {
             out.append(Keyframe(t: duration, camera: inWindow ? last.camera : fullFrame))
         }
         return out
+    }
+
+    // MARK: Target policy
+
+    /// A click the follower is holding on: aimed at up to `clickLookAhead`
+    /// early and kept until `clickHold` after it.
+    private struct HeldClick {
+        var point: CGPoint
+        var until: Double
+    }
+
+    /// Where a zoom opens: the pin if it applies from the start, else the
+    /// first click coming up, else the cursor a lead-in ahead — so the
+    /// zoom-in itself carries the camera onto the action.
+    private func openingTarget(at time: Double, pin: CGPoint?, nextClick: Int) -> CGPoint {
+        if let pin { return pin }
+        if nextClick < clicks.count, clicks[nextClick].t <= time + config.leadIn + config.clickLookAhead {
+            return CGPoint(x: clicks[nextClick].x, y: clicks[nextClick].y)
+        }
+        if let p = FrameComposer.cursorPosition(samples: samples, at: time + config.leadIn) {
+            return CGPoint(x: p.x, y: p.y)
+        }
+        return frameCenter
+    }
+
+    /// The raw target for one tick: the pin while it applies; else an
+    /// upcoming click, held past it; else the cursor a moment ahead — but
+    /// only once it has strayed out of the dead zone around `center`, and
+    /// then pulled far enough in to land in the settle zone, so idle
+    /// wiggles don't move the shot and one glide settles it. `previous` is
+    /// kept while nothing calls for a move.
+    private func selectTarget(
+        at time: Double, pin: CGPoint?, holdZoom: Double, center: CGPoint, previous: CGPoint,
+        held: inout HeldClick?, nextClick: inout Int
+    ) -> CGPoint {
+        if let pin {
+            held = nil
+            return pin
+        }
+        if nextClick < clicks.count, clicks[nextClick].t <= time + config.clickLookAhead {
+            let click = clicks[nextClick]
+            held = HeldClick(point: CGPoint(x: click.x, y: click.y), until: click.t + config.clickHold)
+            nextClick += 1
+        }
+        if let click = held, time <= click.until { return click.point }
+        held = nil
+        guard let p = FrameComposer.cursorPosition(samples: samples, at: time + config.cursorLookAhead) else {
+            return previous
+        }
+        let deadW = width / holdZoom / 2 * config.deadZone
+        let deadH = height / holdZoom / 2 * config.deadZone
+        let settleW = width / holdZoom / 2 * config.settleZone
+        let settleH = height / holdZoom / 2 * config.settleZone
+        var tx = previous.x
+        var ty = previous.y
+        if p.x > center.x + deadW { tx = p.x - settleW } else if p.x < center.x - deadW { tx = p.x + settleW }
+        if p.y > center.y + deadH { ty = p.y - settleH } else if p.y < center.y - deadH { ty = p.y + settleH }
+        return CGPoint(x: tx, y: ty)
     }
 
     /// Camera state at time t, smoothstep-eased between keyframes.

@@ -13,12 +13,36 @@ import UniformTypeIdentifiers
 ///     Crisp --agent-tool --recording <folder> --workspace <dir> <command> …
 ///
 /// Commands: `frame <t> [--raw] [--out name]`, `preview <t> [--plan file]
-/// [--out name]`, `validate [file]`. Everything an agent can see goes
-/// through here so the app and the tools agree on coordinates and timing.
+/// [--out name]`, `validate [file]`, `path [from] [to]`. Everything an agent
+/// can see goes through here so the app and the tools agree on coordinates
+/// and timing; the plan contract itself lives in `AgentPlan`.
 enum AgentTools {
     /// Longest edge of any image handed to an agent: big enough to read UI
     /// text, small enough to fit a model's image budget.
     static let imageMaxEdge: Double = 1280
+
+    // MARK: - Workspace
+
+    /// The standing brief every agent gets: CLAUDE.md for Claude Code and
+    /// AGENTS.md for Codex (both CLIs load these from the working directory
+    /// on their own), plus the `./crisp` wrapper that re-enters this binary
+    /// headlessly for frames, previews and validation.
+    static func installWorkspace(in workspace: URL, recording: Recording) throws {
+        let briefing = Data(AgentPlan.briefing(config: ZoomPlanner.Config()).utf8)
+        try briefing.write(to: workspace.appendingPathComponent("CLAUDE.md"))
+        try briefing.write(to: workspace.appendingPathComponent("AGENTS.md"))
+
+        let executable = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
+        let script = """
+        #!/bin/zsh
+        # Crisp agent tools — see AGENTS.md. Runs the app headlessly.
+        exec "\(executable)" --agent-tool --recording "\(recording.folder.path)" --workspace "\(workspace.path)" "$@"
+
+        """
+        let scriptURL = workspace.appendingPathComponent("crisp")
+        try Data(script.utf8).write(to: scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+    }
 
     // MARK: - Command line
 
@@ -100,7 +124,7 @@ enum AgentTools {
                 if !quiet { print("note: no plan.json here — using the automatic plan from the click log") }
                 return planner.segments(events: meta.events, duration: duration)
             }
-            let parsed = try AIDirector.parsePlan(data, duration: duration, meta: meta)
+            let parsed = try AgentPlan.parse(data, duration: duration, meta: meta)
             if !quiet {
                 for issue in parsed.issues { print("note: \(issue)") }
             }
@@ -159,10 +183,10 @@ enum AgentTools {
         case "validate":
             let url = args.dropFirst().first.map { URL(fileURLWithPath: $0, relativeTo: workspace) }
                 ?? workspace.appendingPathComponent("plan.json")
-            let parsed: AIDirector.ParsedPlan
+            let parsed: AgentPlan.Parsed
             if let data = try? Data(contentsOf: url) {
                 do {
-                    parsed = try AIDirector.parsePlan(data, duration: duration, meta: meta)
+                    parsed = try AgentPlan.parse(data, duration: duration, meta: meta)
                 } catch {
                     print("INVALID: \(error.localizedDescription)")
                     return 1
@@ -171,11 +195,11 @@ enum AgentTools {
                 throw ToolError.message("no plan at \(url.path)")
             } else {
                 print("note: no plan.json here — describing the automatic plan from the click log")
-                parsed = AIDirector.ParsedPlan(
+                parsed = AgentPlan.Parsed(
                     segments: planner.segments(events: meta.events, duration: duration), issues: [], declared: 0
                 )
             }
-            print(AIDirector.describe(parsed.segments, planner: planner, duration: duration))
+            print(AgentPlan.describe(parsed.segments, planner: planner, duration: duration))
             if parsed.issues.isEmpty {
                 print("OK — \(parsed.segments.count) zoom(s), \(parsed.segments.reduce(0) { $0 + $1.steps.count }) step(s); the plan applies exactly as written.")
                 return 0
@@ -221,19 +245,13 @@ enum AgentTools {
 
     // MARK: - Frames for the briefing
 
-    struct Frame {
-        var file: String
-        var t: Double
-        var label: String
-    }
-
     /// The stills handed over with each turn: a wide establishing shot, each
     /// zoom's hold opening, click bursts no zoom covers, and each step once
     /// it has eased in — in that priority, capped at 12, annotated.
     static func extractFrames(
         recording: Recording, meta: RecordingMeta, segments: [ZoomSegment], duration: Double,
         into workspace: URL
-    ) async throws -> [Frame] {
+    ) async throws -> [AgentPlan.Frame] {
         let planner = ZoomPlanner(meta: meta)
         var wanted: [(t: Double, label: String, priority: Int)] = [
             (min(0.5, duration / 2), "wide establishing shot", 0),
@@ -246,7 +264,7 @@ enum AgentTools {
                 wanted.append((window.end, String(format: "zoom %d steps to %.1f× (%.2fs)", i + 1, step.zoom, window.end), 3))
             }
         }
-        for cluster in clickClusters(meta: meta, duration: duration, planner: planner)
+        for cluster in planner.clickClusters(meta.events)
         where !segments.contains(where: { $0.start - 0.5 <= cluster.start && cluster.end <= $0.end + 0.5 }) {
             wanted.append((min(cluster.start + 0.05, max(0, duration - 0.05)),
                            String(format: "%d click(s) at %.2fs — no zoom covers them", cluster.count, cluster.start), 2))
@@ -257,7 +275,7 @@ enum AgentTools {
             .sorted { $0.t < $1.t }
 
         let keys = planner.keyframes(from: segments, duration: duration)
-        var frames: [Frame] = []
+        var frames: [AgentPlan.Frame] = []
         for (index, item) in chosen.enumerated() {
             guard let image = try? await extractFrame(masterURL: recording.masterURL, at: item.t) else { continue }
             let camera = segments.isEmpty ? nil : ZoomPlanner.evaluate(keys, at: item.t)
@@ -268,43 +286,12 @@ enum AgentTools {
             ) else { continue }
             let name = "frame_\(index).jpg"
             try writeJPEG(annotated, to: workspace.appendingPathComponent(name))
-            frames.append(Frame(file: name, t: item.t, label: item.label))
+            frames.append(AgentPlan.Frame(file: name, t: item.t, label: item.label))
         }
         return frames
     }
 
-    // MARK: - Click analysis shared with context.json
-
-    struct ClickCluster {
-        var start: Double
-        var end: Double
-        var count: Int
-        var centerX: Double
-        var centerY: Double
-    }
-
-    /// The same clustering the automatic planner uses (clicks closer than
-    /// `clusterGap` belong to one action).
-    static func clickClusters(meta: RecordingMeta, duration: Double, planner: ZoomPlanner) -> [ClickCluster] {
-        let clicks = meta.events.filter { $0.kind == .leftDown || $0.kind == .rightDown }
-        var groups: [[MouseEvent]] = []
-        var current: [MouseEvent] = []
-        for click in clicks {
-            if let last = current.last, click.t - last.t > planner.config.clusterGap {
-                groups.append(current)
-                current = []
-            }
-            current.append(click)
-        }
-        if !current.isEmpty { groups.append(current) }
-        return groups.map { group in
-            ClickCluster(
-                start: group[0].t, end: group[group.count - 1].t, count: group.count,
-                centerX: group.map(\.x).reduce(0, +) / Double(group.count),
-                centerY: group.map(\.y).reduce(0, +) / Double(group.count)
-            )
-        }
-    }
+    // MARK: - Click analysis
 
     static func clicks(in meta: RecordingMeta, near t: Double, window: Double = 1.5) -> [MouseEvent] {
         meta.events.filter { ($0.kind == .leftDown || $0.kind == .rightDown) && abs($0.t - t) <= window }

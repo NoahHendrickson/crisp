@@ -201,10 +201,10 @@ enum SelfTest {
            "steps": [{"id": "\(stepID.uuidString)", "t": 0.60, "zoom": 5.0},
                      {"t": 0.10, "zoom": 2.0}, {"t": 1.15, "zoom": 2.0}]},
           {"start": 1.25, "end": 1.40, "zoom": 1.8, "steps": []},
-          {"start": 1.30, "end": 5.00, "pin": {"x": 9000, "y": 100}}
+          {"start": 1.30, "end": 5.00, "pins": [{"x": 9000, "y": 100}]}
         ]}
         """
-        let parsed = try AIDirector.parsePlan(Data(plan.utf8), duration: duration, meta: meta)
+        let parsed = try AgentPlan.parse(Data(plan.utf8), duration: duration, meta: meta)
         guard parsed.declared == 3 else { throw SelfTestError.agentTools("declared \(parsed.declared)") }
         guard parsed.segments.first?.id == keepID, parsed.segments.first?.steps.contains(where: { $0.id == stepID }) == true else {
             throw SelfTestError.agentTools("ids not preserved")
@@ -235,15 +235,15 @@ enum SelfTest {
             throw SelfTestError.agentTools("no issue mentioning '\(needle)' in \(parsed.issues)")
         }
         do {
-            _ = try AIDirector.parsePlan(Data("{\"segments\": [{\"start\": 1}]}".utf8), duration: duration, meta: meta)
+            _ = try AgentPlan.parse(Data("{\"segments\": [{\"start\": 1}]}".utf8), duration: duration, meta: meta)
             throw SelfTestError.agentTools("malformed plan accepted")
-        } catch AIDirector.DirectorError.unparseableOutput(let detail) {
+        } catch AgentPlan.ParseError.invalid(let detail) {
             guard detail.contains("end") else { throw SelfTestError.agentTools("decode message unhelpful: \(detail)") }
         }
 
         let workspace = recording.folder.appendingPathComponent("agent-workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
-        try AIDirector.installBriefing(in: workspace, recording: recording)
+        try AgentTools.installWorkspace(in: workspace, recording: recording)
         for name in ["CLAUDE.md", "AGENTS.md", "crisp"] where !FileManager.default.isReadableFile(atPath: workspace.appendingPathComponent(name).path) {
             throw SelfTestError.agentTools("briefing file \(name) missing")
         }
@@ -266,7 +266,7 @@ enum SelfTest {
         guard camera.zoom > 1.5 else { throw SelfTestError.agentTools("preview camera not zoomed: \(camera.zoom)") }
         let previewSize = (try? previewURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         guard previewSize > 10_000 else { throw SelfTestError.agentTools("preview is \(previewSize) bytes") }
-        let context = try AIDirector.buildContext(meta: meta, duration: duration, segments: parsed.segments, frames: frames)
+        let context = try AgentPlan.encodeContext(meta: meta, duration: duration, segments: parsed.segments, frames: frames)
         guard let obj = try JSONSerialization.jsonObject(with: context) as? [String: Any],
               obj["clickClusters"] != nil, obj["currentPlanTiming"] != nil, obj["cursorPath"] != nil else {
             throw SelfTestError.agentTools("context.json missing sections")
