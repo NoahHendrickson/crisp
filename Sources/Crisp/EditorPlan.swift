@@ -47,7 +47,8 @@ extension EditorView {
             let composer = CompareComposer(
                 meta: meta,
                 before: planner().keyframes(from: compareBaseline, duration: duration),
-                after: planner().keyframes(from: compareTarget ?? segments, duration: duration)
+                after: planner().keyframes(from: compareTarget ?? segments, duration: duration),
+                cursorStyle: cursorStyle
             )
             return CameraCompositor.makeComposition(duration: clipDuration, composer: composer)
         }
@@ -60,7 +61,7 @@ extension EditorView {
         let keys = viewMode == .box
             ? [ZoomPlanner.Keyframe(t: 0, camera: full)]
             : planner().keyframes(from: segments, duration: duration)
-        let composer = FrameComposer(meta: meta, keys: keys)
+        let composer = FrameComposer(meta: meta, keys: keys, cursorStyle: cursorStyle)
         return CameraCompositor.makeComposition(duration: clipDuration, composer: composer)
     }
 

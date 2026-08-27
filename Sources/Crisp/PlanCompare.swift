@@ -22,9 +22,9 @@ final class CompareComposer: FrameComposing {
     var width: Double { after.width }
     var height: Double { after.height * 2 + Self.gap }
 
-    init(meta: RecordingMeta, before: [ZoomPlanner.Keyframe], after: [ZoomPlanner.Keyframe]) {
-        self.before = FrameComposer(meta: meta, keys: before)
-        self.after = FrameComposer(meta: meta, keys: after)
+    init(meta: RecordingMeta, before: [ZoomPlanner.Keyframe], after: [ZoomPlanner.Keyframe], cursorStyle: CursorStyle) {
+        self.before = FrameComposer(meta: meta, keys: before, cursorStyle: cursorStyle)
+        self.after = FrameComposer(meta: meta, keys: after, cursorStyle: cursorStyle)
     }
 
     func compose(source: CIImage, at t: Double) -> CIImage {

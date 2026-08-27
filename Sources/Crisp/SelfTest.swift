@@ -44,6 +44,7 @@ enum SelfTest {
         }
 
         try checkCursorKind()
+        try checkCursorStyle()
         print("selftest: cursor kind decode + hold ok")
 
         let recording = Recording(folder: folder)
@@ -95,7 +96,7 @@ enum SelfTest {
         // Second pass: export again through an edited plan.json (the editor path).
         recording.savePlan([
             ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
-        ])
+        ], cursorStyle: .bubbly)
         // Re-exporting (as MP4/H.264) must not overwrite the first export: it
         // should land in a numbered sibling file.
         let planURL = try await Renderer().export(recording: recording, format: .mp4H264) { _ in }
@@ -104,9 +105,11 @@ enum SelfTest {
               recording.exportURLs == [exportURL, planURL] else {
             throw SelfTestError.badExportName(planURL.lastPathComponent)
         }
-        // Each export carries a snapshot of the plan that produced it.
-        guard Recording.loadPlanSegments(from: Recording.planSnapshotURL(for: planURL))?.count == 1 else {
-            throw SelfTestError.badExportName("missing plan snapshot for \(planURL.lastPathComponent)")
+        // Each export carries a snapshot of the plan that produced it,
+        // cursor style included.
+        let snapshot = Recording.loadPlan(from: Recording.planSnapshotURL(for: planURL))
+        guard snapshot?.segments.count == 1, snapshot?.cursorStyle == .bubbly else {
+            throw SelfTestError.badExportName("missing or incomplete plan snapshot for \(planURL.lastPathComponent)")
         }
         let planAsset = AVURLAsset(url: planURL)
         let planDuration = try await planAsset.load(.duration).seconds
@@ -257,7 +260,8 @@ enum SelfTest {
         }
         let previewURL = workspace.appendingPathComponent("preview.jpg")
         let camera = try await AgentTools.renderPreview(
-            recording: recording, meta: meta, segments: parsed.segments, duration: duration, at: 0.7, to: previewURL
+            recording: recording, meta: meta, segments: parsed.segments, duration: duration,
+            cursorStyle: .classic, at: 0.7, to: previewURL
         )
         guard camera.zoom > 1.5 else { throw SelfTestError.agentTools("preview camera not zoomed: \(camera.zoom)") }
         let previewSize = (try? previewURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
@@ -412,6 +416,30 @@ enum SelfTest {
         }
     }
 
+    /// Plans without a cursor style decode as classic and encode without the
+    /// key; every style draws all three cursor kinds.
+    private static func checkCursorStyle() throws {
+        let legacy = try JSONDecoder().decode(ZoomPlan.self, from: Data(#"{"version":1,"segments":[]}"#.utf8))
+        guard legacy.cursorStyle == nil else {
+            throw SelfTestError.cursor("legacy plan decoded a cursor style")
+        }
+        let classic = try JSONEncoder().encode(ZoomPlan(segments: []))
+        let classicObj = try JSONSerialization.jsonObject(with: classic) as? [String: Any]
+        guard classicObj?["cursorStyle"] == nil else {
+            throw SelfTestError.cursor("classic plan encoded a cursorStyle field")
+        }
+        let bubbly = try JSONEncoder().encode(ZoomPlan(segments: [], cursorStyle: .bubbly))
+        guard try JSONDecoder().decode(ZoomPlan.self, from: bubbly).cursorStyle == .bubbly else {
+            throw SelfTestError.cursor("bubbly cursor style did not round-trip")
+        }
+        for style in CursorStyle.allCases {
+            let kinds = FrameComposer.cursorKinds(drawnBy: style)
+            guard kinds == Set([.arrow, .pointer, .iBeam]) else {
+                throw SelfTestError.cursor("\(style) draws \(kinds), not every cursor kind")
+            }
+        }
+    }
+
     /// The editor's compare mode: plan diffing (by id and, for AI replies, by
     /// overlap) and the stacked before/after composer.
     private static func checkCompare(meta: RecordingMeta, width: Int, height: Int, duration: Double) throws {
@@ -471,7 +499,8 @@ enum SelfTest {
         let composer = CompareComposer(
             meta: meta,
             before: planner.keyframes(from: [a], duration: duration),
-            after: planner.keyframes(from: [moved], duration: duration)
+            after: planner.keyframes(from: [moved], duration: duration),
+            cursorStyle: .bubbly
         )
         let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.6))
             .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))

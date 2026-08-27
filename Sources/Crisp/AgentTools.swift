@@ -146,7 +146,8 @@ enum AgentTools {
             let name = out ?? String(format: "preview_t%05.2f.jpg", t)
             let url = workspace.appendingPathComponent(name)
             let camera = try await renderPreview(
-                recording: recording, meta: meta, segments: segments, duration: duration, at: t, to: url
+                recording: recording, meta: meta, segments: segments, duration: duration,
+                cursorStyle: recording.loadPlan()?.cursorStyle ?? .classic, at: t, to: url
             )
             let visible = visibleRect(camera, meta: meta)
             print(url.path)
@@ -328,16 +329,17 @@ enum AgentTools {
     }
 
     /// The exported look at `t` under `segments`, through the real compositor
-    /// (zoom crop, vector cursor, click ripples), written as a JPEG.
+    /// (zoom crop, vector cursor, click ripples), written as a JPEG. The cursor
+    /// style is the recording's, not the agent's to choose.
     @discardableResult
     static func renderPreview(
         recording: Recording, meta: RecordingMeta, segments: [ZoomSegment], duration: Double,
-        at t: Double, to url: URL
+        cursorStyle: CursorStyle, at t: Double, to url: URL
     ) async throws -> Camera {
         let source = try await extractFrame(masterURL: recording.masterURL, at: t)
         let planner = ZoomPlanner(meta: meta)
         let keys = planner.keyframes(from: segments, duration: duration)
-        let composer = FrameComposer(meta: meta, keys: keys)
+        let composer = FrameComposer(meta: meta, keys: keys, cursorStyle: cursorStyle)
         let composed = composer.compose(source: CIImage(cgImage: source), at: t)
         let context = CIContext(options: [.workingColorSpace: srgb, .outputColorSpace: srgb])
         guard let rendered = context.createCGImage(composed, from: composed.extent) else {

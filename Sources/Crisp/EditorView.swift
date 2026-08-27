@@ -53,6 +53,8 @@ struct EditorView: View {
     @State var duration: Double = 1
 
     @State var segments: [ZoomSegment] = []
+    /// How the cursor is drawn, per recording; saved with the plan.
+    @State var cursorStyle: CursorStyle = .classic
     /// A keyframe being dragged along the timeline, with the time it had
     /// when the drag began so it tracks the pointer instead of jumping to it.
     struct TimelineDrag {
@@ -176,6 +178,7 @@ struct EditorView: View {
             if comparing { setComparing(false) }
             player.currentItem?.videoComposition = makeComposition()
         }
+        .onChange(of: cursorStyle) { _, _ in scheduleRebuild() }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             // Compare playback that ran into the end of the master wraps
             // around to the first edited window instead of stopping.
@@ -201,7 +204,9 @@ struct EditorView: View {
             do {
                 let asset = AVURLAsset(url: recording.masterURL)
                 duration = try await asset.load(.duration).seconds
-                segments = recording.loadPlanSegments() ?? autoSegments()
+                let plan = recording.loadPlan()
+                segments = plan?.segments ?? autoSegments()
+                cursorStyle = plan?.cursorStyle ?? .classic
                 cameraKeys = planner().keyframes(from: segments, duration: duration)
                 compareBaseline = segments
                 let item = AVPlayerItem(asset: asset)
@@ -314,7 +319,7 @@ struct EditorView: View {
         rebuildTask = Task {
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard !Task.isCancelled else { return }
-            recording.savePlan(segments)
+            recording.savePlan(segments, cursorStyle: cursorStyle)
             player.currentItem?.videoComposition = makeComposition()
         }
     }

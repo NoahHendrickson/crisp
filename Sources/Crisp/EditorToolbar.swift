@@ -246,8 +246,8 @@ extension EditorView {
 
     // MARK: - Overflow menu
 
-    /// The ⋮ menu: the plan-level actions that don't need a button of
-    /// their own.
+    /// The ⋮ menu: the cursor style and the plan-level actions that don't
+    /// need a button of their own.
     var moreMenu: some View {
         DropdownButton(
             id: "editor.more",
@@ -256,11 +256,16 @@ extension EditorView {
         ) { _ in
             Icon(name: "dots-three-outline-vertical", size: 16, fallback: "ellipsis")
         }
-        .tooltip("More: add or remove a zoom, reset all, export")
+        .tooltip("More: cursor style, add or remove a zoom, reset all, export")
     }
 
     func moreItems() -> [DropdownItem] {
-        var items: [DropdownItem] = []
+        var items: [DropdownItem] = CursorStyle.allCases.map { style in
+            DropdownItem(id: "cursor.\(style.rawValue)", label: style.label,
+                         checked: style == cursorStyle, detail: style.detail) {
+                cursorStyle = style
+            }
+        }
         if let i = holdIndexAtPlayhead {
             items.append(DropdownItem(id: "remove", label: "Remove this zoom") {
                 guard segments.indices.contains(i) else { return }
@@ -279,7 +284,7 @@ extension EditorView {
         if model.exportProgress[folder] == nil {
             items.append(DropdownItem(id: "export", label: "Export with zooms",
                                       detail: "\(model.exportFormat.rawValue), saved next to the master") {
-                recording.savePlan(segments)
+                recording.savePlan(segments, cursorStyle: cursorStyle)
                 model.export(recording)
             })
         }

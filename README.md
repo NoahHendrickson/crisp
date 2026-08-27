@@ -26,9 +26,11 @@ Meanwhile a global mouse monitor logs clicks and samples the cursor position at
 live and a three-row timeline (video, zooms, framing). The camera follows the
 cursor on its own; you set the zoom level and timing (drag a zoom's edges),
 and can pin the viewport for part of a zoom when the action isn't under the
-mouse. The **AI editor** hands the plan, the click log and annotated stills to
-Claude Code or Codex for an editorial pass, with a before/after Compare.
-Edits autosave to `plan.json` beside the master.
+mouse. The ⋮ menu picks the cursor drawn on the video — the classic macOS
+pointer, or a chunkier glossy one — per recording. The **AI editor** hands the
+plan, the click log and annotated stills to Claude Code or Codex for an
+editorial pass, with a before/after Compare. Edits autosave to `plan.json`
+beside the master.
 
 **Export phase** — "Export with zooms" clusters the clicks into zoom segments
 (or uses the edited plan), bakes smoothstep-eased camera keyframes with the

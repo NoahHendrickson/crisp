@@ -195,11 +195,39 @@ extension ZoomSegment {
     }
 }
 
+/// How the re-drawn cursor looks in the preview and the export. Chosen per
+/// recording and saved in plan.json; missing there is classic (older plans).
+enum CursorStyle: String, Codable, CaseIterable, Identifiable {
+    /// The macOS arrow, hand and I-beam, redrawn as flat vectors.
+    case classic
+    /// Chunky rounded shapes with a glossy body and soft shadow, drawn a
+    /// little bigger.
+    case bubbly
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .classic: return "Classic cursor"
+        case .bubbly: return "Cute cursor"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .classic: return "The macOS pointer, redrawn sharp at any zoom"
+        case .bubbly: return "Rounded, glossy and a little bigger"
+        }
+    }
+}
+
 /// Edited zoom plan, saved as plan.json next to the master. When present, the
 /// exporter uses it instead of auto-generating from the click log.
 struct ZoomPlan: Codable {
     var version: Int = 1
     var segments: [ZoomSegment]
+    /// nil = classic. Omitted from JSON so older plans round-trip unchanged.
+    var cursorStyle: CursorStyle? = nil
 }
 
 /// A recording on disk: a folder containing master.mov + events.json
@@ -212,31 +240,30 @@ struct Recording: Identifiable, Equatable {
     var eventsURL: URL { folder.appendingPathComponent("events.json") }
     var planURL: URL { folder.appendingPathComponent("plan.json") }
 
+    func loadPlan() -> ZoomPlan? {
+        Self.loadPlan(from: planURL)
+    }
+
+    static func loadPlan(from url: URL) -> ZoomPlan? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ZoomPlan.self, from: data)
+    }
+
     func loadPlanSegments() -> [ZoomSegment]? {
-        Self.loadPlanSegments(from: planURL)
+        loadPlan()?.segments
     }
 
-    static func loadPlanSegments(from url: URL) -> [ZoomSegment]? {
-        guard let data = try? Data(contentsOf: url),
-              let plan = try? JSONDecoder().decode(ZoomPlan.self, from: data) else { return nil }
-        return plan.segments
-    }
-
-    func savePlan(_ segments: [ZoomSegment]) {
-        Self.savePlan(segments, to: planURL)
-    }
-
-    static func savePlan(_ segments: [ZoomSegment], to url: URL) {
-        try? writePlan(segments, to: url)
+    func savePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle) {
+        try? Self.writePlan(segments, cursorStyle: cursorStyle, to: planURL)
     }
 
     /// Throwing form for callers that must know the plan reached disk
     /// (the export snapshot gates "export succeeded" on it).
-    static func writePlan(_ segments: [ZoomSegment], to url: URL) throws {
+    static func writePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(ZoomPlan(segments: segments))
-        try data.write(to: url, options: .atomic)
+        let plan = ZoomPlan(segments: segments, cursorStyle: cursorStyle == .classic ? nil : cursorStyle)
+        try encoder.encode(plan).write(to: url, options: .atomic)
     }
 
     /// Sidecar written next to each export with the zoom plan that produced it
