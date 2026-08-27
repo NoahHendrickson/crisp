@@ -423,13 +423,18 @@ struct EditorView: View {
         planner().pinWindows(for: seg, duration: duration)
     }
 
+    /// The steps that begin inside a zoom's hold, in time order.
+    func holdSteps(in seg: ZoomSegment) -> [ZoomStep] {
+        planner().holdSteps(for: seg, duration: duration)
+    }
+
     /// Slack around a keyframe's time, so a playhead parked on one still
     /// counts as being on it after the player reports back.
     static let keyframeSlop = 0.03
 
     /// True while the playhead is strictly inside one of `seg`'s step eases.
     func isMidStep(in seg: ZoomSegment) -> Bool {
-        seg.steps.contains { step in
+        holdSteps(in: seg).contains { step in
             let window = stepWindow(step, in: seg)
             return currentTime > window.start + Self.keyframeSlop
                 && currentTime < window.end - Self.keyframeSlop
@@ -439,9 +444,10 @@ struct EditorView: View {
     /// Index of the latest step whose level the camera has reached by the
     /// playhead, if any.
     func activeStepIndex(in seg: ZoomSegment) -> Int? {
-        seg.steps.indices
-            .filter { stepWindow(seg.steps[$0], in: seg).end <= currentTime + Self.keyframeSlop }
-            .max { seg.steps[$0].t < seg.steps[$1].t }
+        guard let step = holdSteps(in: seg).last(where: {
+            stepWindow($0, in: seg).end <= currentTime + Self.keyframeSlop
+        }) else { return nil }
+        return seg.steps.firstIndex { $0.id == step.id }
     }
 
 }

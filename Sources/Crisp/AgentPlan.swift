@@ -288,7 +288,7 @@ enum AgentPlan {
                 format: "zoom %d: camera moves %.2fs → fully zoomed %.2fs (hold opens %.2fs) → hold ends %.2fs → full frame by %.2fs | %.2f×%@",
                 index + 1, span.moveStart, span.arrive, seg.start, span.end, span.outEnd, seg.zoom, framing
             ))
-            for step in seg.steps.sorted(by: { $0.t < $1.t }) {
+            for step in planner.holdSteps(for: seg, duration: duration) {
                 let window = planner.stepWindow(step, in: seg, duration: duration)
                 lines.append(String(
                     format: "    step: from %.2fs eases to %.2f× by %.2fs",

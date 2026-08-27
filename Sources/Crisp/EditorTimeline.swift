@@ -196,7 +196,7 @@ extension EditorView {
             holdX, seg.zoom,
             String(format: "Zoomed %.1f× — drag the edges to change when it starts and ends; the toolbar sets the level at the playhead", seg.zoom)
         )]
-        for step in seg.steps.sorted(by: { $0.t < $1.t }) {
+        for step in holdSteps(in: seg) {
             let window = stepWindow(step, in: seg)
             edges.append((
                 x(of: window.start, width: w), step.zoom,
@@ -243,7 +243,7 @@ extension EditorView {
                 .tooltip(part.help)
         }
 
-        ForEach(seg.steps) { step in
+        ForEach(holdSteps(in: seg)) { step in
             Rectangle()
                 .fill(Theme.barBorder)
                 .frame(width: 1, height: Self.rowHeight - 4)
@@ -258,7 +258,10 @@ extension EditorView {
                 color: Theme.zoomBar,
                 dragging: timelineDrag?.target == target,
                 onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
-                onEnd: { timelineDrag = nil }
+                onEnd: {
+                    timelineDrag = nil
+                    pruneChildren(of: seg.id)
+                }
             )
             .offset(x: edgeX - TimelineEdgeHandle.width / 2)
             .tooltip(edge == .leading
@@ -467,6 +470,18 @@ extension EditorView {
             // At the hold's end the pin is open again: held until released.
             segments[at.seg].pins[at.pin].until = until >= seg.end - 0.001 ? nil : until
         }
+    }
+
+    /// After a hold's edge has moved: drop the steps and pins the hold no
+    /// longer reaches (the planner already ignores them; this keeps the
+    /// saved plan honest about what plays).
+    func pruneChildren(of segID: UUID) {
+        guard let i = segments.firstIndex(where: { $0.id == segID }) else { return }
+        let seg = segments[i]
+        let liveSteps = Set(holdSteps(in: seg).map(\.id))
+        let livePins = Set(pinWindows(for: seg).map(\.id))
+        segments[i].steps.removeAll { !liveSteps.contains($0.id) }
+        segments[i].pins.removeAll { !livePins.contains($0.id) }
     }
 
     /// The model time a drag target currently has (unclamped, so a drag

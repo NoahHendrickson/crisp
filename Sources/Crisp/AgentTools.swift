@@ -32,16 +32,24 @@ enum AgentTools {
         try briefing.write(to: workspace.appendingPathComponent("CLAUDE.md"))
         try briefing.write(to: workspace.appendingPathComponent("AGENTS.md"))
 
+        // Every path is quoted as one zsh word: a recording can be named
+        // almost anything, and this is shell source.
         let executable = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
         let script = """
         #!/bin/zsh
         # Crisp agent tools — see AGENTS.md. Runs the app headlessly.
-        exec "\(executable)" --agent-tool --recording "\(recording.folder.path)" --workspace "\(workspace.path)" "$@"
+        exec \(shellQuoted(executable)) --agent-tool --recording \(shellQuoted(recording.folder.path)) --workspace \(shellQuoted(workspace.path)) "$@"
 
         """
         let scriptURL = workspace.appendingPathComponent("crisp")
         try Data(script.utf8).write(to: scriptURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+    }
+
+    /// `s` as a single zsh word: single-quoted, with any embedded quote
+    /// closed, escaped and reopened. Nothing inside is expanded.
+    static func shellQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     // MARK: - Command line

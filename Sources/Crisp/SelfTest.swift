@@ -30,8 +30,11 @@ enum SelfTest {
     }
 
     static func run() async throws {
+        // The folder name carries every shell metacharacter a recording name
+        // can (only "/" and ":" are refused), so the agent's `./crisp` wrapper
+        // is exercised against a hostile path.
         let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("crisp-selftest-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            .appendingPathComponent("crisp-selftest-\(ProcessInfo.processInfo.processIdentifier) it's \"$(echo pwned)\" `x`", isDirectory: true)
         try? FileManager.default.removeItem(at: folder)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let keep = ProcessInfo.processInfo.environment["CRISP_SELFTEST_KEEP"] == "1"
@@ -132,6 +135,8 @@ enum SelfTest {
         print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
 
         try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
+
+        try checkStaleChildren(meta: try recording.loadMeta())
         print("selftest: compare diff + stacked composer ok")
 
         try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
@@ -249,6 +254,21 @@ enum SelfTest {
         }
         guard FileManager.default.isExecutableFile(atPath: workspace.appendingPathComponent("crisp").path) else {
             throw SelfTestError.agentTools("./crisp not executable")
+        }
+        // Run the wrapper for real: it re-enters this binary with the
+        // recording's metacharacter-laden path, which must arrive intact.
+        let crisp = Process()
+        crisp.executableURL = workspace.appendingPathComponent("crisp")
+        crisp.arguments = ["validate"]
+        crisp.currentDirectoryURL = workspace
+        let pipe = Pipe()
+        crisp.standardOutput = pipe
+        crisp.standardError = pipe
+        try crisp.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        crisp.waitUntilExit()
+        guard crisp.terminationStatus == 0, output.contains("OK —") else {
+            throw SelfTestError.agentTools("./crisp validate failed (exit \(crisp.terminationStatus)): \(output.suffix(300))")
         }
         let frames = try await AgentTools.extractFrames(
             recording: recording, meta: meta, segments: parsed.segments, duration: duration, into: workspace
@@ -436,6 +456,31 @@ enum SelfTest {
             let kinds = FrameComposer.cursorKinds(drawnBy: style)
             guard kinds == Set([.arrow, .pointer, .iBeam]) else {
                 throw SelfTestError.cursor("\(style) draws \(kinds), not every cursor kind")
+            }
+        }
+    }
+
+    /// A step or pin left past a hold's end (the zoom was shortened under
+    /// it) must not leak into the camera: the hold keeps its own level and
+    /// the zoom-out is framed as if the pin weren't there.
+    private static func checkStaleChildren(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 3.0
+        let clean = ZoomSegment(start: 0.4, end: 1.0, zoom: 1.5)
+        var stale = clean
+        stale.steps = [ZoomStep(t: 1.5, zoom: 3.0)]
+        stale.pins = [PinWindow(x: 100, y: 100, from: 1.5)]
+        guard planner.holdSteps(for: stale, duration: duration).isEmpty,
+              planner.pinWindows(for: stale, duration: duration).isEmpty else {
+            throw SelfTestError.compare("a step or pin past the hold end still has a window")
+        }
+        let staleKeys = planner.keyframes(from: [stale], duration: duration)
+        let cleanKeys = planner.keyframes(from: [clean], duration: duration)
+        for t in stride(from: 0.0, through: duration, by: 0.1) {
+            let a = ZoomPlanner.evaluate(staleKeys, at: t)
+            let b = ZoomPlanner.evaluate(cleanKeys, at: t)
+            guard abs(a.zoom - b.zoom) < 1e-6, abs(a.center.x - b.center.x) < 0.5, abs(a.center.y - b.center.y) < 0.5 else {
+                throw SelfTestError.compare(String(format: "stale step/pin changed the camera at %.1fs: %.2f× (%.0f, %.0f) vs %.2f× (%.0f, %.0f)", t, a.zoom, a.center.x, a.center.y, b.zoom, b.center.x, b.center.y))
             }
         }
     }

@@ -153,6 +153,14 @@ struct ZoomPlanner {
         return (start, min(start + config.stepDuration, span.end))
     }
 
+    /// The steps that begin inside a hold, in time order. A step left past
+    /// the hold's end (the zoom was shortened under it) has no window and is
+    /// ignored until the hold grows back over it.
+    func holdSteps(for seg: ZoomSegment, duration: Double) -> [ZoomStep] {
+        let end = motionSpan(for: seg, duration: duration).end
+        return seg.steps.filter { $0.t < end - 1e-6 }.sorted { $0.t < $1.t }
+    }
+
     // MARK: - Keyframes
 
     /// The plan's zoom level over time as sparse keyframes (centres are the
@@ -173,7 +181,7 @@ struct ZoomPlanner {
             var level = seg.zoom
             keys.append(Keyframe(t: span.arrive, camera: Camera(zoom: level, center: frameCenter)))
             var lastT = span.arrive
-            for step in seg.steps.sorted(by: { $0.t < $1.t }) {
+            for step in holdSteps(for: seg, duration: duration) {
                 let window = stepWindow(step, in: seg, duration: duration)
                 guard window.end > lastT else { continue }
                 keys.append(Keyframe(t: max(window.start, lastT), camera: Camera(zoom: level, center: frameCenter)))
@@ -222,11 +230,13 @@ struct ZoomPlanner {
 
     /// When each of a zoom's pins applies: `from`/`until` clamped into the
     /// hold (defaulting to its edges), in time order, each cut short at the
-    /// next pin's start so they never overlap.
+    /// next pin's start so they never overlap. A pin the hold no longer
+    /// reaches (the zoom was shortened under it) has no window and is
+    /// ignored until the hold grows back over it.
     func pinWindows(for seg: ZoomSegment, duration: Double) -> [(id: UUID, from: Double, until: Double)] {
         let span = motionSpan(for: seg, duration: duration)
         let sorted = seg.pins.sorted { ($0.from ?? seg.start) < ($1.from ?? seg.start) }
-        return sorted.indices.map { i in
+        return sorted.indices.compactMap { i -> (id: UUID, from: Double, until: Double)? in
             let pin = sorted[i]
             let from = min(max(pin.from ?? seg.start, seg.start), span.end)
             var until = min(max(pin.until ?? span.end, from), span.end)
@@ -234,6 +244,7 @@ struct ZoomPlanner {
                 let nextFrom = min(max(sorted[i + 1].from ?? seg.start, seg.start), span.end)
                 until = min(until, max(from, nextFrom))
             }
+            guard until > from + 1e-6 else { return nil }
             return (pin.id, from, until)
         }
     }
@@ -247,9 +258,8 @@ struct ZoomPlanner {
         segments.sorted { $0.start < $1.start }.compactMap { seg in
             let span = motionSpan(for: seg, duration: duration)
             guard span.end > span.moveStart else { return nil }
-            // Every step lands inside the hold (stepWindow clamps it), so the
-            // last one by time is the level the zoom-out starts from.
-            let levelOut = seg.steps.max { $0.t < $1.t }?.zoom ?? seg.zoom
+            // The last step inside the hold is the level the zoom-out starts from.
+            let levelOut = holdSteps(for: seg, duration: duration).last?.zoom ?? seg.zoom
             let pins = pinWindows(for: seg, duration: duration).compactMap { window in
                 seg.pins.first { $0.id == window.id }.map { ($0.point, window.from, window.until) }
             }
