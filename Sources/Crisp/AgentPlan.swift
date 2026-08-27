@@ -9,11 +9,10 @@ import CoreGraphics
 enum AgentPlan {
     // MARK: - Rules
 
-    static let zoomRange: ClosedRange<Double> = 1.2...3.0
-    /// Shortest hold, and the least clear space between one zoom's end and
-    /// the next's start.
-    static let minHold = 0.3
-    static let minGap = 0.2
+    /// The planner's rules, as the agent is held to them.
+    static let zoomRange = ZoomPlanner.zoomRange
+    static let minHold = ZoomPlanner.minHold
+    static let minGap = ZoomPlanner.minGap
     static let easeRange: ClosedRange<Double> = 0.1...8
 
     // MARK: - Plan document
@@ -149,6 +148,7 @@ enum AgentPlan {
         let levels = String(format: "%.1f–%.1f", zoomRange.lowerBound, zoomRange.upperBound)
         let width = Double(meta.pixelWidth)
         let height = Double(meta.pixelHeight)
+        let planner = ZoomPlanner(meta: meta)
 
         for (n, seg) in document.segments.sorted(by: { $0.start < $1.start }).enumerated() {
             let label = "zoom \(n + 1) (start \(f(seg.start)))"
@@ -248,6 +248,13 @@ enum AgentPlan {
                 }
                 segment.zoomOut = clamped
             }
+            // A step that would never play — its ease clamped onto the same
+            // end as the step before it — is dropped, and said so.
+            let playing = Set(planner.holdSteps(for: segment, duration: duration).map(\.id))
+            for step in segment.steps where !playing.contains(step.id) {
+                issues.append("\(label) step at \(f(step.t)): never plays — its ease would end where the step before it already does (the hold ends at \(f(end))s) → dropped")
+            }
+            segment.steps.removeAll { !playing.contains($0.id) }
             result.append(segment)
         }
 

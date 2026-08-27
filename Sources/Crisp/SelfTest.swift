@@ -48,6 +48,7 @@ enum SelfTest {
 
         try checkCursorKind()
         try checkCursorStyle()
+        try checkHoldRoom()
         print("selftest: cursor kind decode + hold ok")
 
         let recording = Recording(folder: folder)
@@ -137,6 +138,8 @@ enum SelfTest {
         try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
 
         try checkStaleChildren(meta: try recording.loadMeta())
+        try checkCrowdedSteps(meta: try recording.loadMeta())
+        try checkOverlappingZooms(meta: try recording.loadMeta())
         print("selftest: compare diff + stacked composer ok")
 
         try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
@@ -278,6 +281,19 @@ enum SelfTest {
             let size = (try? workspace.appendingPathComponent(frame.file).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             guard size > 10_000 else { throw SelfTestError.agentTools("frame \(frame.file) is \(size) bytes") }
         }
+        // A later turn's (smaller) set of stills replaces the earlier one;
+        // the agent's own frame_tNN.NN.jpg stays.
+        let own = workspace.appendingPathComponent("frame_t00.50.jpg")
+        try Data("not a jpeg".utf8).write(to: own)
+        let later = try await AgentTools.extractFrames(
+            recording: recording, meta: meta, segments: [], duration: duration, into: workspace
+        )
+        let stills = ((try? FileManager.default.contentsOfDirectory(atPath: workspace.path)) ?? [])
+            .filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }.sorted()
+        guard stills == (later.map(\.file) + ["frame_t00.50.jpg"]).sorted() else {
+            throw SelfTestError.agentTools("stale stills left behind: \(stills) vs \(later.map(\.file))")
+        }
+        try FileManager.default.removeItem(at: own)
         let previewURL = workspace.appendingPathComponent("preview.jpg")
         let camera = try await AgentTools.renderPreview(
             recording: recording, meta: meta, segments: parsed.segments, duration: duration,
@@ -482,6 +498,73 @@ enum SelfTest {
             guard abs(a.zoom - b.zoom) < 1e-6, abs(a.center.x - b.center.x) < 0.5, abs(a.center.y - b.center.y) < 0.5 else {
                 throw SelfTestError.compare(String(format: "stale step/pin changed the camera at %.1fs: %.2f× (%.0f, %.0f) vs %.2f× (%.0f, %.0f)", t, a.zoom, a.center.x, a.center.y, b.zoom, b.center.x, b.center.y))
             }
+        }
+    }
+
+    /// The editor's neighbour rule: a new zoom fits between holds, never
+    /// inside one, and a hold may grow only up to the gap before the next.
+    private static func checkHoldRoom() throws {
+        let a = ZoomSegment(start: 5.0, end: 8.0, zoom: 1.8)
+        let b = ZoomSegment(start: 1.0, end: 3.0, zoom: 1.8)
+        guard ZoomPlanner.freeRoom(at: 4.0, in: [a, b], duration: 10) == 3.2...4.8 else {
+            throw SelfTestError.compare("free room between zooms: \(String(describing: ZoomPlanner.freeRoom(at: 4.0, in: [a, b], duration: 10)))")
+        }
+        guard ZoomPlanner.freeRoom(at: 6.0, in: [a], duration: 10) == nil else {
+            throw SelfTestError.compare("free room reported inside a hold")
+        }
+        guard ZoomPlanner.holdRoom(for: a.id, in: [a, b], duration: 10) == 3.2...10,
+              ZoomPlanner.holdRoom(for: b.id, in: [a, b], duration: 10) == 0...4.8 else {
+            throw SelfTestError.compare("hold room crosses a neighbour")
+        }
+    }
+
+    /// Two steps whose eases clamp onto the same hold end: only the first
+    /// plays, and the keyframes, the zoom-out level, the validator and the
+    /// description all agree on that.
+    private static func checkCrowdedSteps(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 3.0
+        let seg = ZoomSegment(start: 1.0, end: 1.4, zoom: 1.5,
+                              steps: [ZoomStep(t: 1.0, zoom: 2.0), ZoomStep(t: 1.2, zoom: 3.0)])
+        let playing = planner.holdSteps(for: seg, duration: duration)
+        guard playing.map(\.zoom) == [2.0] else {
+            throw SelfTestError.compare("crowded steps: \(playing.map(\.zoom)) play, expected [2.0]")
+        }
+        let keys = planner.keyframes(from: [seg], duration: duration)
+        let atEnd = ZoomPlanner.evaluate(keys, at: 1.4).zoom
+        guard abs(atEnd - 2.0) < 1e-6 else {
+            throw SelfTestError.compare("crowded steps: hold ends at \(atEnd)×, expected 2.0×")
+        }
+        let parsed = try AgentPlan.parse(AgentPlan.encode([seg]), duration: duration, meta: meta)
+        guard parsed.segments.first?.steps.map(\.zoom) == [2.0],
+              parsed.issues.contains(where: { $0.contains("never plays") }) else {
+            throw SelfTestError.compare("validator kept a step that never plays: \(parsed.issues)")
+        }
+        guard !AgentPlan.describe([seg], planner: planner, duration: duration).contains("3.00×") else {
+            throw SelfTestError.compare("describe lists a step that never plays")
+        }
+    }
+
+    /// Overlapping zooms: the later one takes over where its motion starts,
+    /// with strictly increasing keyframe times and no cut in the level.
+    private static func checkOverlappingZooms(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 10.0
+        let keys = planner.levelKeyframes(
+            from: [ZoomSegment(start: 4.0, end: 6.0, zoom: 1.5), ZoomSegment(start: 5.0, end: 8.0, zoom: 2.5)],
+            duration: duration
+        )
+        for (p, q) in zip(keys, keys.dropFirst()) where q.t <= p.t {
+            throw SelfTestError.compare("overlapping zooms: keyframe times not increasing at \(q.t)s")
+        }
+        var t = 3.0
+        while t < 9.0 {
+            let z0 = ZoomPlanner.evaluate(keys, at: t).zoom
+            let z1 = ZoomPlanner.evaluate(keys, at: t + 0.01).zoom
+            guard abs(z1 - z0) < 0.05 else {
+                throw SelfTestError.compare(String(format: "overlapping zooms: level cuts %.2f× → %.2f× at %.2fs", z0, z1, t))
+            }
+            t += 0.01
         }
     }
 

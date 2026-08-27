@@ -66,9 +66,12 @@ struct EditorView: View {
         let origin: Double
     }
     @State var timelineDrag: TimelineDrag?
-    /// The plan's baked camera (levels + follower framing), refreshed when the
-    /// plan changes so the crop box doesn't re-run the follower per render.
+    /// The plan's baked camera (levels + follower framing), rebuilt off the
+    /// main thread a beat after the plan changes (see `scheduleRebuild`) so
+    /// the crop box and the toolbar never re-run the follower per render.
     @State var cameraKeys: [ZoomPlanner.Keyframe] = []
+    /// One planner per recording: it sorts the click log once.
+    @State var plannerCache: ZoomPlanner?
     @State var player = AVPlayer()
     @State var currentTime: Double = 0
     @State var timeObserver: Any?
@@ -171,7 +174,6 @@ struct EditorView: View {
         }
         .onChange(of: segments) { _, _ in
             if comparing && planDiff == nil { setComparing(false) }
-            cameraKeys = planner().keyframes(from: segments, duration: duration)
             scheduleRebuild()
         }
         .onChange(of: viewMode) { _, _ in
@@ -196,6 +198,7 @@ struct EditorView: View {
         do {
             let m = try recording.loadMeta()
             meta = m
+            plannerCache = ZoomPlanner(meta: m)
         } catch {
             loadError = "Could not load this recording's click log: \(error.localizedDescription)"
             return
@@ -313,20 +316,32 @@ struct EditorView: View {
             )
     }
 
-    /// Debounced: autosave the plan and swap in a fresh preview composition.
+    /// Debounced, and off the main thread: bake the camera for the plan as
+    /// it now stands, then autosave it and swap in a fresh preview
+    /// composition. A drag mutates the plan on every pointer sample; only
+    /// the last one, 150ms on, pays for the follower.
     func scheduleRebuild() {
         rebuildTask?.cancel()
+        let plan = segments
+        let style = cursorStyle
+        let planner = planner()
+        let duration = duration
         rebuildTask = Task {
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard !Task.isCancelled else { return }
-            recording.savePlan(segments, cursorStyle: cursorStyle)
+            let keys = await Task.detached(priority: .userInitiated) {
+                planner.keyframes(from: plan, duration: duration)
+            }.value
+            guard !Task.isCancelled else { return }
+            cameraKeys = keys
+            recording.savePlan(plan, cursorStyle: style)
             player.currentItem?.videoComposition = makeComposition()
         }
     }
 
     // MARK: - Frame overlay
 
-    static let zoomRange: ClosedRange<Double> = 1.2...3.0
+    static let zoomRange = ZoomPlanner.zoomRange
 
     /// Crop box over the full frame in the box view: where the camera is at
     /// the playhead, editable inside a zoom's hold.

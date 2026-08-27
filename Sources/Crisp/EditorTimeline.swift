@@ -258,10 +258,7 @@ extension EditorView {
                 color: Theme.zoomBar,
                 dragging: timelineDrag?.target == target,
                 onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
-                onEnd: {
-                    timelineDrag = nil
-                    pruneChildren(of: seg.id)
-                }
+                onEnd: { timelineDrag = nil }
             )
             .offset(x: edgeX - TimelineEdgeHandle.width / 2)
             .tooltip(edge == .leading
@@ -430,9 +427,9 @@ extension EditorView {
     // MARK: - Moving keyframes
 
     /// Move a keyframe by the pointer's travel since its drag began. Zoom
-    /// edges keep the 0.2s minimum hold; a pin stays inside its hold and
-    /// clear of the pins either side of it. Drags only move keyframes,
-    /// they never scrub.
+    /// edges keep the minimum hold and stay clear of the neighbouring
+    /// zooms; a pin stays inside its hold and clear of the pins either side
+    /// of it. Drags only move keyframes, they never scrub.
     func dragKeyframe(_ target: TimelineDrag.Target, translation dx: CGFloat, width w: CGFloat) {
         guard w > 0 else { return }
         let drag: TimelineDrag
@@ -447,10 +444,12 @@ extension EditorView {
         switch target {
         case .zoomStart(let id):
             guard let i = segments.firstIndex(where: { $0.id == id }) else { return }
-            segments[i].start = min(max(0, t), segments[i].end - 0.2)
+            let room = ZoomPlanner.holdRoom(for: id, in: segments, duration: duration)
+            segments[i].start = min(max(room.lowerBound, t), segments[i].end - ZoomPlanner.minHold)
         case .zoomEnd(let id):
             guard let i = segments.firstIndex(where: { $0.id == id }) else { return }
-            segments[i].end = max(min(duration, t), segments[i].start + 0.2)
+            let room = ZoomPlanner.holdRoom(for: id, in: segments, duration: duration)
+            segments[i].end = max(min(room.upperBound, t), segments[i].start + ZoomPlanner.minHold)
         case .pinStart(let segID, let pinID):
             guard let at = pinIndices(segment: segID, pin: pinID) else { return }
             let seg = segments[at.seg]
@@ -470,18 +469,6 @@ extension EditorView {
             // At the hold's end the pin is open again: held until released.
             segments[at.seg].pins[at.pin].until = until >= seg.end - 0.001 ? nil : until
         }
-    }
-
-    /// After a hold's edge has moved: drop the steps and pins the hold no
-    /// longer reaches (the planner already ignores them; this keeps the
-    /// saved plan honest about what plays).
-    func pruneChildren(of segID: UUID) {
-        guard let i = segments.firstIndex(where: { $0.id == segID }) else { return }
-        let seg = segments[i]
-        let liveSteps = Set(holdSteps(in: seg).map(\.id))
-        let livePins = Set(pinWindows(for: seg).map(\.id))
-        segments[i].steps.removeAll { !liveSteps.contains($0.id) }
-        segments[i].pins.removeAll { !livePins.contains($0.id) }
     }
 
     /// The model time a drag target currently has (unclamped, so a drag

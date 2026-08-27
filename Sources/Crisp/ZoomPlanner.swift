@@ -84,6 +84,34 @@ struct ZoomPlanner {
 
     var frameCenter: CGPoint { CGPoint(x: width / 2, y: height / 2) }
 
+    // MARK: - Rules
+
+    /// The levels a zoom may hold, the shortest hold, and the least clear
+    /// space between one zoom's end and the next's start — one rule for the
+    /// editor, the automatic plan and the agent's validator, so holds never
+    /// overlap (overlapping motion windows would fight over the camera).
+    static let zoomRange: ClosedRange<Double> = 1.2...3.0
+    static let minHold = 0.3
+    static let minGap = 0.2
+
+    /// The room `id`'s hold may occupy without crossing its neighbours: from
+    /// the previous hold's end plus the gap to the next hold's start minus it.
+    static func holdRoom(for id: UUID, in segments: [ZoomSegment], duration: Double) -> ClosedRange<Double> {
+        guard let seg = segments.first(where: { $0.id == id }) else { return 0...duration }
+        let floor = segments.filter { $0.id != id && $0.start < seg.start }.map { $0.end + minGap }.max() ?? 0
+        let ceiling = segments.filter { $0.id != id && $0.start >= seg.start }.map { $0.start - minGap }.min() ?? duration
+        return min(floor, ceiling)...max(floor, ceiling)
+    }
+
+    /// The free stretch around `t` between neighbouring holds, or nil when
+    /// `t` is inside one or there is no room for a hold there.
+    static func freeRoom(at t: Double, in segments: [ZoomSegment], duration: Double) -> ClosedRange<Double>? {
+        guard !segments.contains(where: { $0.start <= t && t <= $0.end }) else { return nil }
+        let floor = max(0, segments.filter { $0.end < t }.map { $0.end + minGap }.max() ?? 0)
+        let ceiling = min(duration, segments.filter { $0.start > t }.map { $0.start - minGap }.min() ?? duration)
+        return ceiling - floor >= minHold ? floor...ceiling : nil
+    }
+
     // MARK: - Automatic plan
 
     /// One action in the click log: clicks closer together than
@@ -153,12 +181,23 @@ struct ZoomPlanner {
         return (start, min(start + config.stepDuration, span.end))
     }
 
-    /// The steps that begin inside a hold, in time order. A step left past
-    /// the hold's end (the zoom was shortened under it) has no window and is
-    /// ignored until the hold grows back over it.
+    /// The steps that play in a hold, in time order: those that begin inside
+    /// it and whose ease reaches its level after the step before it did. A
+    /// step left past the hold's end (the zoom was shortened under it), or
+    /// crowded onto the same clamped end as an earlier step, has no window
+    /// and is ignored until the hold grows back over it. The one rule for
+    /// the keyframes, the zoom-out level, the editor and the validator.
     func holdSteps(for seg: ZoomSegment, duration: Double) -> [ZoomStep] {
-        let end = motionSpan(for: seg, duration: duration).end
-        return seg.steps.filter { $0.t < end - 1e-6 }.sorted { $0.t < $1.t }
+        let span = motionSpan(for: seg, duration: duration)
+        var lastEnd = span.arrive
+        var playing: [ZoomStep] = []
+        for step in seg.steps.sorted(by: { $0.t < $1.t }) where step.t < span.end - 1e-6 {
+            let window = stepWindow(step, in: seg, duration: duration)
+            guard window.end > lastEnd else { continue }
+            playing.append(step)
+            lastEnd = window.end
+        }
+        return playing
     }
 
     // MARK: - Keyframes
@@ -183,7 +222,6 @@ struct ZoomPlanner {
             var lastT = span.arrive
             for step in holdSteps(for: seg, duration: duration) {
                 let window = stepWindow(step, in: seg, duration: duration)
-                guard window.end > lastT else { continue }
                 keys.append(Keyframe(t: max(window.start, lastT), camera: Camera(zoom: level, center: frameCenter)))
                 keys.append(Keyframe(t: window.end, camera: Camera(zoom: step.zoom, center: frameCenter)))
                 level = step.zoom
@@ -196,14 +234,13 @@ struct ZoomPlanner {
             keys.append(Keyframe(t: duration, camera: fullFrame))
         }
 
-        // Guarantee monotonic times (overlapping segments can reorder slightly).
+        // Strictly increasing times: a zoom whose motion starts inside an
+        // earlier one's (overlapping holds, or a zoom-in that begins before
+        // the previous zoom-out has finished) takes over from where it starts.
         var cleaned: [Keyframe] = []
         for key in keys {
-            if let last = cleaned.last, key.t <= last.t {
-                cleaned[cleaned.count - 1] = key
-            } else {
-                cleaned.append(key)
-            }
+            while let last = cleaned.last, key.t <= last.t { cleaned.removeLast() }
+            cleaned.append(key)
         }
         return cleaned
     }

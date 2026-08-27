@@ -21,16 +21,18 @@ extension EditorView {
         loadPlan(autoSegments())
     }
 
-    /// A 2s zoom whose hold begins at `t`; the follower frames it.
+    /// A zoom whose hold begins at `t` and runs up to 2s, kept clear of the
+    /// neighbouring zooms; nothing is added when there is no room. The
+    /// follower frames it.
     func addZoom(at t: Double) {
-        let start = min(t, max(0, duration - 0.5))
-        let end = min(start + 2.0, duration)
+        guard let room = ZoomPlanner.freeRoom(at: t, in: segments, duration: duration) else { return }
+        let start = min(max(t, room.lowerBound), room.upperBound - ZoomPlanner.minHold)
+        let end = min(start + 2.0, room.upperBound)
         segments.append(ZoomSegment(start: start, end: end, zoom: ZoomPlanner.Config().zoomLevel))
     }
 
     func planner() -> ZoomPlanner {
-        guard let meta else { return ZoomPlanner(width: 1, height: 1) }
-        return ZoomPlanner(meta: meta)
+        plannerCache ?? ZoomPlanner(width: 1, height: 1)
     }
 
     func autoSegments() -> [ZoomSegment] {
@@ -60,7 +62,7 @@ extension EditorView {
         )
         let keys = viewMode == .box
             ? [ZoomPlanner.Keyframe(t: 0, camera: full)]
-            : planner().keyframes(from: segments, duration: duration)
+            : cameraKeys
         let composer = FrameComposer(meta: meta, keys: keys, cursorStyle: cursorStyle)
         return CameraCompositor.makeComposition(duration: clipDuration, composer: composer)
     }

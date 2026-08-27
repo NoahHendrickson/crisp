@@ -253,13 +253,27 @@ enum AgentTools {
 
     // MARK: - Frames for the briefing
 
+    /// Remove the stills an earlier turn wrote (`frame_N.jpg`, `moment_*.jpg`)
+    /// so the agent never studies a previous plan's framing as current. The
+    /// stills the agent made itself (`frame_tNN.NN.jpg`, `preview_*.jpg`) stay.
+    static func clearStills(in workspace: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: workspace.path)) ?? []
+        for name in names where name.hasSuffix(".jpg") {
+            let ours = name.hasPrefix("moment_")
+                || (name.hasPrefix("frame_") && name.dropFirst("frame_".count).first?.isNumber == true)
+            if ours { try? FileManager.default.removeItem(at: workspace.appendingPathComponent(name)) }
+        }
+    }
+
     /// The stills handed over with each turn: a wide establishing shot, each
     /// zoom's hold opening, click bursts no zoom covers, and each step once
-    /// it has eased in — in that priority, capped at 12, annotated.
+    /// it has eased in — in that priority, capped at 12, annotated. Replaces
+    /// the previous turn's set entirely.
     static func extractFrames(
         recording: Recording, meta: RecordingMeta, segments: [ZoomSegment], duration: Double,
         into workspace: URL
     ) async throws -> [AgentPlan.Frame] {
+        clearStills(in: workspace)
         let planner = ZoomPlanner(meta: meta)
         var wanted: [(t: Double, label: String, priority: Int)] = [
             (min(0.5, duration / 2), "wide establishing shot", 0),
