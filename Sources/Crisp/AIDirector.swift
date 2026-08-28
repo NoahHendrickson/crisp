@@ -278,12 +278,14 @@ enum AIDirector {
                 )
             }
 
-            try await runTurn(
-                prompt: started
-                    ? AIDirector.followUpPrompt(note: note, moment: moment)
-                    : AIDirector.firstPrompt(note: note, moment: moment, frames: frames, workspace: workspace),
-                onEvent: onEvent
-            )
+            // The prompt is built per attempt: when a stale resume falls back
+            // to a fresh conversation, the new session needs the full first
+            // prompt (with the frame list), not the follow-up.
+            try await runTurn(onEvent: onEvent) { fresh in
+                fresh
+                    ? AIDirector.firstPrompt(note: note, moment: moment, frames: self.frames, workspace: self.workspace)
+                    : AIDirector.followUpPrompt(note: note, moment: moment)
+            }
 
             var (parsed, issues) = planState(planURL)
             if !issues.isEmpty {
@@ -291,7 +293,7 @@ enum AIDirector {
                 // validate` prints exactly these checks, so it can iterate.
                 AppModel.log("AI editor: plan needs fixes, asking the agent: \(issues.joined(separator: " | "))")
                 onEvent(.activity(.other, "Fixing \(issues.count) rule issue\(issues.count == 1 ? "" : "s") in the plan"))
-                try await runTurn(prompt: AIDirector.fixupPrompt(issues: issues), onEvent: onEvent)
+                try await runTurn(onEvent: onEvent) { _ in AIDirector.fixupPrompt(issues: issues) }
                 (parsed, issues) = planState(planURL)
             }
             guard let parsed else { throw DirectorError.unparseableOutput(issues.first ?? "unknown problem") }
@@ -301,14 +303,15 @@ enum AIDirector {
             return Outcome(plan: parsed.segments, adjustments: issues)
         }
 
-        /// Run one CLI invocation with `prompt`, falling back once to a fresh
-        /// conversation when resuming a stale provider session fails before
-        /// it emits anything (e.g. cleared CLI history).
-        private func runTurn(prompt: String, onEvent: @escaping (AIEvent) -> Void) async throws {
+        /// Run one CLI invocation, falling back once to a fresh conversation
+        /// when resuming a stale provider session fails before it emits
+        /// anything (e.g. cleared CLI history). `prompt` is asked for the
+        /// text per attempt — a fresh fallback needs the first-turn prompt.
+        private func runTurn(onEvent: @escaping (AIEvent) -> Void, prompt: (_ fresh: Bool) -> String) async throws {
             var retriedFresh = false
             while true {
                 let resuming = started
-                try Data(prompt.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
+                try Data(prompt(!resuming).utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
 
                 var sawEvent = false
                 var errorMessage: String?
@@ -359,27 +362,34 @@ enum AIDirector {
 
         // MARK: Commands
 
+        /// The whole command runs through `zsh -l -c`, so every interpolated
+        /// value is quoted as an inert single word (`shellQuoted` — double
+        /// quotes would still expand `$(…)`; the Codex model slug comes from
+        /// a network-fed cache and the resume id from the CLI's own output).
+        /// `exec` replaces the shell with the CLI so terminate/kill signals
+        /// reach the agent process itself, not a wrapper that would orphan it.
         private func makeCommand(resume: Bool) -> String {
-            let bin = "\"\(provider.path)\""
+            let q = AgentTools.shellQuoted
+            let bin = q(provider.path)
             // Both CLIs take model/effort per invocation, so they're repeated on resume.
-            let modelFlag = model.map { " --model \"\($0)\"" } ?? ""
+            let modelFlag = model.map { " --model \(q($0))" } ?? ""
             switch provider.kind {
             case .claude:
                 let id = sessionID ?? UUID().uuidString.lowercased()
                 sessionID = id
-                let session = resume ? "--resume \(id)" : "--session-id \(id)"
-                let effortFlag = effort.map { " --effort \($0)" } ?? ""
+                let session = resume ? "--resume \(q(id))" : "--session-id \(q(id))"
+                let effortFlag = effort.map { " --effort \(q($0))" } ?? ""
                 // acceptEdits: file writes inside the workspace cwd are auto-approved;
                 // the allow-list lets the agent run the ./crisp tools unprompted.
-                return "\(bin) -p \(session)\(modelFlag)\(effortFlag) --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools \"Read,Write,Edit,Bash(./crisp:*)\" < prompt.txt"
+                return "exec \(bin) -p \(session)\(modelFlag)\(effortFlag) --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools \(q("Read,Write,Edit,Bash(./crisp:*)")) < prompt.txt"
             case .codex:
-                let images = frames.map { "-i \"\($0.file)\"" }.joined(separator: " ")
-                let effortFlag = effort.map { " -c model_reasoning_effort=\\\"\($0)\\\"" } ?? ""
-                let common = "--json --skip-git-repo-check -c sandbox_mode=\\\"workspace-write\\\"" + modelFlag + effortFlag
+                let images = frames.map { "-i \(q($0.file))" }.joined(separator: " ")
+                let effortFlag = effort.map { " -c \(q("model_reasoning_effort=\"\($0)\""))" } ?? ""
+                let common = "--json --skip-git-repo-check -c \(q("sandbox_mode=\"workspace-write\""))" + modelFlag + effortFlag
                 if resume, let sessionID {
-                    return "\(bin) exec resume \(sessionID) \(common) \(images) - < prompt.txt"
+                    return "exec \(bin) exec resume \(q(sessionID)) \(common) \(images) - < prompt.txt"
                 }
-                return "\(bin) exec \(common) \(images) - < prompt.txt"
+                return "exec \(bin) exec \(common) \(images) - < prompt.txt"
             }
         }
 
@@ -621,7 +631,7 @@ enum AIDirector {
 
                 let timeoutWork = DispatchWorkItem {
                     queue.async { timedOut = true }
-                    if process.isRunning { process.terminate() }
+                    Self.terminateThenKill(process, after: 2.0, on: queue)
                 }
                 queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
 
@@ -640,6 +650,11 @@ enum AIDirector {
 
                 do {
                     try process.run()
+                    // A cancel that landed before run() saw isRunning false
+                    // and terminated nothing; catch up with it here.
+                    queue.async {
+                        if cancelled { Self.terminateThenKill(process, after: 2.0, on: queue) }
+                    }
                 } catch {
                     timeoutWork.cancel()
                     queue.async {
@@ -651,7 +666,19 @@ enum AIDirector {
             }
         } onCancel: {
             queue.async { cancelled = true }
-            if process.isRunning { process.terminate() }
+            terminateThenKill(process, after: 2.0, on: queue)
+        }
+    }
+
+    /// SIGTERM, escalating to SIGKILL after `grace` if the process is still
+    /// running — a CLI that ignores the polite signal must not keep burning
+    /// the user's subscription (or hang the turn's continuation) forever.
+    private static func terminateThenKill(_ process: Process, after grace: TimeInterval, on queue: DispatchQueue) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        process.terminate()
+        queue.asyncAfter(deadline: .now() + grace) {
+            if process.isRunning { kill(pid, SIGKILL) }
         }
     }
 
