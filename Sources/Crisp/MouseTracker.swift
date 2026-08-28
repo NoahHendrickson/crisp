@@ -75,6 +75,13 @@ final class MouseTracker {
         timer = nil
     }
 
+    /// Safety net: `stop()` is the contract, but a dropped tracker must not
+    /// leave global event monitors installed and the run-loop-retained timer
+    /// firing for the rest of the app's life.
+    deinit {
+        stop()
+    }
+
     // MARK: - Logging
 
     private func logClick(_ event: NSEvent) {

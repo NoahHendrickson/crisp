@@ -115,6 +115,15 @@ final class AppModel: ObservableObject {
     private var currentFolder: URL?
     private var currentSource: CaptureSource?
     private var startedAt: Date?
+    /// `startRecording` suspends across the stream launch and `state` only
+    /// flips once it succeeds; without this guard a second ⌘R in that
+    /// window would start a second session over the first.
+    private var isStartingRecording = false
+    /// The in-flight teardown, if any. Concurrent stops (⌘R racing the
+    /// quit-time stop, or a stream error racing either) await it instead of
+    /// tearing the same session down twice — and the quit path must not
+    /// reply "terminate" until the master's moov atom is written.
+    private var stopTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     private var accessCheckTask: Task<Void, Never>?
     private var activationObserver: (any NSObjectProtocol)?
@@ -510,6 +519,9 @@ final class AppModel: ObservableObject {
     }
 
     func startRecording() async {
+        guard !isStartingRecording, !isRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
         guard hasScreenAccess else {
             state = .error("Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch.")
             return
@@ -531,8 +543,14 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        let folder: URL
         do {
-            let folder = try Recording.newFolder()
+            folder = try Recording.newFolder()
+        } catch {
+            state = .error("Could not start recording: \(error.localizedDescription)")
+            return
+        }
+        do {
             let engine = CaptureEngine()
             let tracker = MouseTracker()
 
@@ -542,9 +560,8 @@ final class AppModel: ObservableObject {
                 }
             }
             engine.onStreamError = { [weak self] error in
-                DispatchQueue.main.async {
-                    self?.state = .error("Recording stopped: \(error.localizedDescription)")
-                    self?.cleanupAfterStop()
+                Task { @MainActor in
+                    await self?.salvageAfterStreamError(error)
                 }
             }
 
@@ -571,43 +588,116 @@ final class AppModel: ObservableObject {
             // Get out of the way of what's being recorded.
             NSApp.hide(nil)
         } catch {
+            // Don't leave the freshly created folder (and any zero-frame
+            // master.mov in it) as a dead entry in the library.
+            try? FileManager.default.removeItem(at: folder)
             state = .error("Could not start recording: \(error.localizedDescription)")
         }
     }
 
     func stopRecording() async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
         guard let engine, let tracker, let folder = currentFolder,
               let source = currentSource, let startedAt else { return }
+        let task = Task {
+            await finishRecording(engine: engine, tracker: tracker, folder: folder,
+                                  source: source, startedAt: startedAt, streamError: nil)
+        }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    /// The stream died out from under a recording (display unplugged, grant
+    /// revoked, writer failure): salvage what was captured — everything up
+    /// to the failure stays usable instead of being abandoned without a
+    /// moov atom.
+    private func salvageAfterStreamError(_ streamError: Error) async {
+        guard stopTask == nil, let engine, let tracker, let folder = currentFolder,
+              let source = currentSource, let startedAt else { return }
+        Self.log("stream error mid-recording: \(streamError.localizedDescription)")
+        let task = Task {
+            await finishRecording(engine: engine, tracker: tracker, folder: folder,
+                                  source: source, startedAt: startedAt, streamError: streamError)
+        }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    /// Tear the active session down: stop the tracker, finalize the writer,
+    /// and write the click log — used by Stop and by stream failure.
+    private func finishRecording(
+        engine: CaptureEngine, tracker: MouseTracker, folder: URL,
+        source: CaptureSource, startedAt: Date, streamError: Error?
+    ) async {
         tracker.stop()
+        var failure: Error?
         do {
             try await engine.stop()
-            let meta = RecordingMeta(
-                source: source.kindName,
-                displayID: source.displayID,
-                pixelWidth: engine.pixelWidth,
-                pixelHeight: engine.pixelHeight,
-                scaleFactor: engine.scaleFactor,
-                fps: 60,
-                codec: codec.rawValue,
-                startedAt: startedAt,
-                sessionStartHostSeconds: engine.sessionStartHostSeconds ?? 0,
-                events: tracker.events,
-                samples: tracker.samples
-            )
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(meta).write(to: folder.appendingPathComponent("events.json"))
-            state = .idle
         } catch {
-            state = .error("Could not finish recording: \(error.localizedDescription)")
+            failure = error
+        }
+        if failure as? CaptureEngine.CaptureError == .noFramesCaptured {
+            // Nothing was captured: don't leave a dead entry in the library.
+            try? FileManager.default.removeItem(at: folder)
+            state = .error(streamError.map { "Recording stopped: \($0.localizedDescription)" }
+                ?? "Nothing was captured — the recording stopped before the first frame arrived.")
+        } else {
+            // Write the click log even when finalizing threw: the events are
+            // valid in memory, and the master often is too.
+            do {
+                try writeEvents(engine: engine, tracker: tracker, folder: folder,
+                                source: source, startedAt: startedAt)
+            } catch {
+                if failure == nil { failure = error }
+            }
+            if let failure, streamError != nil {
+                Self.log("salvage after stream error also failed: \(failure.localizedDescription)")
+            }
+            if let streamError {
+                state = .error("Recording stopped: \(streamError.localizedDescription)")
+            } else if let failure {
+                state = .error("Could not finish recording: \(failure.localizedDescription)")
+            } else {
+                state = .idle
+            }
         }
         cleanupAfterStop()
         recordings = Recording.loadAll()
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func writeEvents(
+        engine: CaptureEngine, tracker: MouseTracker, folder: URL,
+        source: CaptureSource, startedAt: Date
+    ) throws {
+        let meta = RecordingMeta(
+            source: source.kindName,
+            displayID: source.displayID,
+            pixelWidth: engine.pixelWidth,
+            pixelHeight: engine.pixelHeight,
+            scaleFactor: engine.scaleFactor,
+            fps: 60,
+            codec: codec.rawValue,
+            startedAt: startedAt,
+            sessionStartHostSeconds: engine.sessionStartHostSeconds ?? 0,
+            events: tracker.events,
+            samples: tracker.samples
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(meta).write(to: folder.appendingPathComponent("events.json"))
+    }
+
     private func cleanupAfterStop() {
+        // Belt and braces: `stop()` is idempotent, and no exit path may
+        // leave the global event monitors and the 60Hz timer installed.
+        tracker?.stop()
         engine = nil
         tracker = nil
         currentFolder = nil
