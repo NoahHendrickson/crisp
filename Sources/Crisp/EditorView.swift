@@ -95,6 +95,10 @@ struct EditorView: View {
     @State var comparing = false
     @StateObject var aiChat = AIChat()
     @State var showAIPanel = false
+    /// True while the AI panel's composer field has keyboard focus — the
+    /// timeline's bare-key Space shortcut yields only then, so Space still
+    /// plays/pauses while the panel is open but not being typed into.
+    @State var aiComposerFocused = false
     /// The moment "Send timestamp to chat" attached to the AI panel's next note.
     @State var aiAttachedTime: Double?
     @State private var windowHandle = EditorWindowHandle()
@@ -139,6 +143,7 @@ struct EditorView: View {
                             meta: meta,
                             duration: duration,
                             attachedTime: $aiAttachedTime,
+                            composerIsFocused: $aiComposerFocused,
                             segments: segments,
                             onApply: { loadPlan($0) },
                             onCompare: { before, after in
@@ -335,6 +340,9 @@ struct EditorView: View {
             guard !Task.isCancelled else { return }
             cameraKeys = keys
             recording.savePlan(plan, cursorStyle: style)
+            // The sidebar caches zoom/step counts; every plan write refreshes
+            // them, so the library stays live while the editor is open.
+            model.refreshSummary(for: folder)
             player.currentItem?.videoComposition = makeComposition()
         }
     }

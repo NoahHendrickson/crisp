@@ -260,14 +260,13 @@ struct ZoomPlanner {
         follow(levelKeyframes(from: segments, duration: duration), segments: segments, duration: duration)
     }
 
-    /// One zoom's motion window, kept only for pin lookup — the ramp blend
-    /// itself is read off the level keyframes (see `rampState`).
-    private struct Window {
-        var moveStart: Double
-        var end: Double
-        var outEnd: Double
-        var holdStart: Double
-        var pins: [(point: CGPoint, from: Double, until: Double)]
+    /// One pin's effective range, precomputed for the follower: its
+    /// `pinWindows` range widened onto the ramps that border it — a pin from
+    /// the hold's start also frames the zoom-in, one to its end the zoom-out.
+    private struct PinRange {
+        var point: CGPoint
+        var from: Double
+        var until: Double
     }
 
     /// When each of a zoom's pins applies: `from`/`until` clamped into the
@@ -296,15 +295,19 @@ struct ZoomPlanner {
         pinWindows(for: seg, duration: duration).first { $0.id == id }.map { ($0.from, $0.until) }
     }
 
-    private func windows(for segments: [ZoomSegment], duration: Double) -> [Window] {
-        segments.sorted { $0.start < $1.start }.compactMap { seg in
+    private func pinRanges(for segments: [ZoomSegment], duration: Double) -> [PinRange] {
+        segments.sorted { $0.start < $1.start }.flatMap { seg -> [PinRange] in
             let span = motionSpan(for: seg, duration: duration)
-            guard span.end > span.moveStart else { return nil }
-            let pins = pinWindows(for: seg, duration: duration).compactMap { window in
-                seg.pins.first { $0.id == window.id }.map { ($0.point, window.from, window.until) }
+            guard span.end > span.moveStart else { return [] }
+            return pinWindows(for: seg, duration: duration).compactMap { window in
+                seg.pins.first { $0.id == window.id }.map {
+                    PinRange(
+                        point: $0.point,
+                        from: window.from <= seg.start + 1e-6 ? span.moveStart : window.from,
+                        until: window.until >= span.end - 1e-6 ? span.outEnd : window.until
+                    )
+                }
             }
-            return Window(moveStart: span.moveStart, end: span.end, outEnd: span.outEnd,
-                          holdStart: seg.start, pins: pins)
         }
     }
 
@@ -314,14 +317,18 @@ struct ZoomPlanner {
     /// used to disagree with it at the edges, cutting the centre mid-hold):
     /// `progress` is 0 at full frame and 1 fully zoomed, and `holdZoom` is
     /// the level the follower should frame for — during a ramp, the level
-    /// it is heading to or coming from. `cursor` resumes the key search for
-    /// sequential callers; `zoom` is the level already evaluated at `t`.
+    /// it is heading to or coming from. The bracketing pair is read off
+    /// `levelCursor` — the cursor `evaluate` just advanced for the same `t`
+    /// (`levels[levelCursor-1].t <= t < levels[levelCursor].t` for interior
+    /// `t`; clamped at the ends, where the bracket is degenerate anyway) —
+    /// so one cursor drives both walks; `zoom` is the level already
+    /// evaluated at `t`.
     private func rampState(
-        at t: Double, levels: [Keyframe], windows: [Window], zoom: Double, cursor: inout Int
+        at t: Double, levels: [Keyframe], pins: [PinRange], zoom: Double, levelCursor: Int
     ) -> (progress: Double, holdZoom: Double, pin: CGPoint?)? {
-        while cursor + 1 < levels.count, levels[cursor + 1].t <= t { cursor += 1 }
-        let a = levels[cursor].camera.zoom
-        let b = cursor + 1 < levels.count ? levels[cursor + 1].camera.zoom : a
+        let hi = min(max(levelCursor, 1), levels.count - 1)
+        let a = levels[hi - 1].camera.zoom
+        let b = levels[hi].camera.zoom
         let holdZoom: Double
         if a <= 1.0001 && b <= 1.0001 {
             return nil  // full frame on both sides: not in any zoom's motion
@@ -335,22 +342,7 @@ struct ZoomPlanner {
         // The zoom interpolates smoothstep between the bracketing keys, so
         // this is the same eased ramp progress as smoothstepping the time.
         let progress = min(max((zoom - 1) / max(holdZoom - 1, 1e-6), 0), 1)
-        return (progress, holdZoom, pinnedPoint(at: t, windows: windows))
-    }
-
-    /// The pin framing the camera at `t`, if any. A pin holds through the
-    /// ramps that border its range: a pin from the hold's start also frames
-    /// the zoom-in, one to its end also frames the zoom-out.
-    private func pinnedPoint(at t: Double, windows: [Window]) -> CGPoint? {
-        for w in windows where t >= w.moveStart && t <= w.outEnd {
-            let pinned = w.pins.first { pin in
-                let from = pin.from <= w.holdStart + 1e-6 ? w.moveStart : pin.from
-                let until = pin.until >= w.end - 1e-6 ? w.outEnd : pin.until
-                return t >= from && t <= until
-            }?.point
-            if let pinned { return pinned }
-        }
-        return nil
+        return (progress, holdZoom, pins.first { t >= $0.from && t <= $0.until }?.point)
     }
 
     /// Carry the centre along the cursor and clicks while zoomed.
@@ -376,8 +368,8 @@ struct ZoomPlanner {
     /// eased spring carries the camera onto it and, when the pin releases,
     /// back to following — so pinning and releasing are glides, not cuts.
     private func follow(_ levels: [Keyframe], segments: [ZoomSegment], duration: Double) -> [Keyframe] {
-        let windows = windows(for: segments, duration: duration)
-        guard !windows.isEmpty, levels.contains(where: { $0.camera.zoom > 1.001 }) else { return levels }
+        guard levels.contains(where: { $0.camera.zoom > 1.001 }) else { return levels }
+        let pins = pinRanges(for: segments, duration: duration)
         let dt = 1 / Self.followRate
         let omega = 2 * Double.pi / config.followPeriod
         let aimBlend = 1 - exp(-dt / config.aimSmoothing)
@@ -392,13 +384,12 @@ struct ZoomPlanner {
         var nextClick = 0
         var inWindow = false
         var levelIndex = 0
-        var rampIndex = 0
 
         var t = dt
         while t <= duration + dt / 2 {
             let time = min(t, duration)
             let zoom = Self.evaluate(levels, at: time, from: &levelIndex).zoom
-            guard let state = rampState(at: time, levels: levels, windows: windows, zoom: zoom, cursor: &rampIndex),
+            guard let state = rampState(at: time, levels: levels, pins: pins, zoom: zoom, levelCursor: levelIndex),
                   zoom > 1.0001 || state.progress > 0 else {
                 if inWindow {
                     out.append(Keyframe(t: time, camera: fullFrame))

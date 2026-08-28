@@ -754,7 +754,12 @@ private struct RecordingRow: View {
     var body: some View {
         // From the model's cache: computing a summary reads the disk, which
         // must not happen here (rows re-render on every ~2s thumbnail tick).
-        let summary = model.summaries[recording.folder] ?? recording.summary
+        // A miss (the cache refreshes off-main, a beat behind `recordings`)
+        // shows a size-less placeholder for that beat instead of touching disk.
+        let summary = model.summaries[recording.folder] ?? Recording.Summary(
+            format: recording.masterURL.pathExtension.uppercased(),
+            fileSize: nil, zoomCount: 0, stepCount: 0, hasExport: false
+        )
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 if renaming {

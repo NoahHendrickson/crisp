@@ -64,12 +64,11 @@ enum SelfTest {
         try writeSyntheticEvents(
             to: recording.eventsURL, width: width, height: height, duration: duration
         )
-        do {
-            let meta = try recording.loadMeta()
-            guard meta.samples.contains(where: { $0.kind == .pointer }),
-                  meta.samples.contains(where: { $0.kind == nil }) else {
-                throw SelfTestError.cursor("synthetic events missing pointer span or arrow ticks")
-            }
+        // Read + decoded once; events.json never changes after this point.
+        let meta = try recording.loadMeta()
+        guard meta.samples.contains(where: { $0.kind == .pointer }),
+              meta.samples.contains(where: { $0.kind == nil }) else {
+            throw SelfTestError.cursor("synthetic events missing pointer span or arrow ticks")
         }
 
         print("selftest: master written, exporting with zooms...")
@@ -135,15 +134,15 @@ enum SelfTest {
         }
         print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
 
-        try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
+        try checkCompare(meta: meta, width: width, height: height, duration: duration)
 
-        try checkStaleChildren(meta: try recording.loadMeta())
-        try checkCrowdedSteps(meta: try recording.loadMeta())
-        try checkOverlappingZooms(meta: try recording.loadMeta())
-        try checkEndOfVideoHold(meta: try recording.loadMeta())
+        try checkStaleChildren(meta: meta)
+        try checkCrowdedSteps(meta: meta)
+        try checkOverlappingZooms(meta: meta)
+        try checkEndOfVideoHold(meta: meta)
         print("selftest: compare diff + stacked composer ok")
 
-        try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
+        try await checkAgentTools(recording: recording, meta: meta, duration: duration)
         print("selftest: agent tools ok — validation, annotated frames, preview render, briefing")
 
         // Optional online leg: exercise the real AI editor loop (spends a small
@@ -159,7 +158,6 @@ enum SelfTest {
             let effort = ProcessInfo.processInfo.environment["CRISP_AI_EFFORT"]
             let tag = [model, effort].compactMap { $0 }.joined(separator: ", ")
             print("selftest: AI editor via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
-            let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
             let session = try AIDirector.Session(

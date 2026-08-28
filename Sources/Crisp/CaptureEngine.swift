@@ -43,6 +43,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     private var input: AVAssetWriterInput?
     private var sessionStarted = false
     private var lastPTS: CMTime = .invalid
+    /// Set when the writer died mid-recording (append failure): `stop()`
+    /// rethrows it so no caller mistakes the discarded file for a clean stop.
+    private var abortError: Error?
 
     /// Host-clock seconds of the first written frame; set once the session starts.
     private(set) var sessionStartHostSeconds: Double?
@@ -146,7 +149,16 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 guard let writer, let input else {
-                    cont.resume()
+                    // The writer already died mid-recording (see the append-
+                    // failure path): its file was discarded, so report the
+                    // failure rather than a clean stop.
+                    if let abortError {
+                        self.abortError = nil
+                        cont.resume(throwing: sessionStarted && lastPTS.isValid
+                            ? abortError : CaptureError.noFramesCaptured)
+                    } else {
+                        cont.resume()
+                    }
                     return
                 }
                 self.writer = nil
@@ -237,10 +249,14 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 // The writer died mid-recording (disk full is the classic
                 // case). Surface it now rather than at Stop — otherwise the
-                // app keeps showing "Recording…" while writing nothing.
+                // app keeps showing "Recording…" while writing nothing. A
+                // failed writer can't be finalized, so cancel it (discarding
+                // its file) and keep the error for `stop()` to rethrow.
                 let error = writer.error ?? CaptureError.writerFailed
                 self.writer = nil
                 self.input = nil
+                self.abortError = error
+                writer.cancelWriting()
                 onStreamError?(error)
             }
         }

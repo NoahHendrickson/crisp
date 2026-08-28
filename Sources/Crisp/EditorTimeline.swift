@@ -66,9 +66,9 @@ extension EditorView {
             }
             .buttonStyle(.themed(.outline, size: .md, iconOnly: true))
             // Unmodified key equivalents are matched before the focused view
-            // sees the event: while the AI panel is open (its composer takes
-            // focus), Space must type a space, not toggle playback.
-            .keyboardShortcut(showAIPanel ? nil : KeyboardShortcut(.space, modifiers: []))
+            // sees the event: while the AI panel's composer has focus, Space
+            // must type a space, not toggle playback.
+            .keyboardShortcut(aiComposerFocused ? nil : KeyboardShortcut(.space, modifiers: []))
             .tooltip("Play / pause (Space)")
             VStack(alignment: .leading, spacing: Self.rowGap) {
                 ruler

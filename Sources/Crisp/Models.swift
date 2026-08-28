@@ -291,8 +291,6 @@ struct Recording: Identifiable, Equatable {
             .map { folder.appendingPathComponent($0.1) }
     }
 
-    var hasExport: Bool { !exportURLs.isEmpty }
-
     /// What the library sidebar shows under a recording's name: the container
     /// and size of the newest file (latest export, else the master), plus the
     /// zoom and step counts of the current plan.json.

@@ -278,14 +278,17 @@ enum AIDirector {
                 )
             }
 
-            // The prompt is built per attempt: when a stale resume falls back
-            // to a fresh conversation, the new session needs the full first
-            // prompt (with the frame list), not the follow-up.
-            try await runTurn(onEvent: onEvent) { fresh in
-                fresh
-                    ? AIDirector.firstPrompt(note: note, moment: moment, frames: self.frames, workspace: self.workspace)
-                    : AIDirector.followUpPrompt(note: note, moment: moment)
-            }
+            // When a stale resume falls back to a fresh conversation, the new
+            // session has seen nothing: it needs the full first prompt (with
+            // the frame list), not the follow-up.
+            let firstPrompt = AIDirector.firstPrompt(
+                note: note, moment: moment, frames: frames, workspace: workspace
+            )
+            try await runTurn(
+                prompt: started ? AIDirector.followUpPrompt(note: note, moment: moment) : firstPrompt,
+                freshFallbackPrompt: firstPrompt,
+                onEvent: onEvent
+            )
 
             var (parsed, issues) = planState(planURL)
             if !issues.isEmpty {
@@ -293,7 +296,14 @@ enum AIDirector {
                 // validate` prints exactly these checks, so it can iterate.
                 AppModel.log("AI editor: plan needs fixes, asking the agent: \(issues.joined(separator: " | "))")
                 onEvent(.activity(.other, "Fixing \(issues.count) rule issue\(issues.count == 1 ? "" : "s") in the plan"))
-                try await runTurn(onEvent: onEvent) { _ in AIDirector.fixupPrompt(issues: issues) }
+                // A fresh fallback here has no session history either: give it
+                // the first-turn briefing with the fixup appended, not the
+                // context-free fixup alone.
+                try await runTurn(
+                    prompt: AIDirector.fixupPrompt(issues: issues),
+                    freshFallbackPrompt: firstPrompt + "\n\n" + AIDirector.fixupPrompt(issues: issues),
+                    onEvent: onEvent
+                )
                 (parsed, issues) = planState(planURL)
             }
             guard let parsed else { throw DirectorError.unparseableOutput(issues.first ?? "unknown problem") }
@@ -305,13 +315,17 @@ enum AIDirector {
 
         /// Run one CLI invocation, falling back once to a fresh conversation
         /// when resuming a stale provider session fails before it emits
-        /// anything (e.g. cleared CLI history). `prompt` is asked for the
-        /// text per attempt — a fresh fallback needs the first-turn prompt.
-        private func runTurn(onEvent: @escaping (AIEvent) -> Void, prompt: (_ fresh: Bool) -> String) async throws {
+        /// anything (e.g. cleared CLI history). A fresh session has no
+        /// history, so it gets `freshFallbackPrompt` — the full first-turn
+        /// briefing — instead of the follow-up `prompt`.
+        private func runTurn(
+            prompt: String, freshFallbackPrompt: String? = nil, onEvent: @escaping (AIEvent) -> Void
+        ) async throws {
             var retriedFresh = false
             while true {
                 let resuming = started
-                try Data(prompt(!resuming).utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
+                let text = resuming ? prompt : (freshFallbackPrompt ?? prompt)
+                try Data(text.utf8).write(to: workspace.appendingPathComponent("prompt.txt"))
 
                 var sawEvent = false
                 var errorMessage: String?

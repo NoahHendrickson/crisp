@@ -12,17 +12,6 @@ import VideoToolbox
 /// must keep animating even when the source is static).
 final class Renderer {
 
-    struct Cancelled: Error {}
-
-    /// Set from the main thread while the export loop reads it from its
-    /// detached task — lock-guarded so the write is guaranteed visible.
-    var isCancelled: Bool {
-        get { cancelLock.withLock { cancelled } }
-        set { cancelLock.withLock { cancelled = newValue } }
-    }
-    private let cancelLock = NSLock()
-    private var cancelled = false
-
     private let ciContext: CIContext = {
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
         return CIContext(options: [
@@ -107,7 +96,6 @@ final class Renderer {
         let frameCount = max(1, Int(duration * fps))
 
         var currentFrame: CIImage?
-        var composedAnything = false
         // copyNextSampleBuffer returns nil both at end-of-file and when the
         // reader fails (a corrupt master): the failure must throw, or every
         // remaining output frame silently duplicates the last decoded one
@@ -122,7 +110,7 @@ final class Renderer {
         var pendingSample: CMSampleBuffer? = try nextSample()
 
         for frameIndex in 0..<frameCount {
-            if isCancelled { throw Cancelled() }
+            try Task.checkCancellation()
 
             let t = Double(frameIndex) / fps
 
@@ -140,13 +128,13 @@ final class Renderer {
             }
 
             let composed = composer.compose(source: source, at: t)
-            composedAnything = true
 
             // Wait for the writer to drain (offline export, simple polling is
             // fine) — but bail on cancel or writer death (disk full), which
             // otherwise leave isReadyForMoreMediaData false forever.
+            // (Task.sleep also throws as soon as the task is cancelled.)
             while !input.isReadyForMoreMediaData {
-                if isCancelled { throw Cancelled() }
+                try Task.checkCancellation()
                 guard writer.status == .writing else {
                     throw writer.error ?? RenderError.writerFailed
                 }
@@ -169,7 +157,7 @@ final class Renderer {
             }
         }
 
-        guard composedAnything else { throw RenderError.readerFailed }
+        guard currentFrame != nil else { throw RenderError.emptyMaster }
         input.markAsFinished()
         await writer.finishWriting()
         if let error = writer.error { throw error }
@@ -221,10 +209,11 @@ final class Renderer {
     }
 
     enum RenderError: LocalizedError {
-        case noVideoTrack, readerFailed, writerFailed
+        case noVideoTrack, emptyMaster, readerFailed, writerFailed
         var errorDescription: String? {
             switch self {
             case .noVideoTrack: return "The master file has no video track."
+            case .emptyMaster: return "The master file contains no frames."
             case .readerFailed: return "Could not read the master file."
             case .writerFailed: return "Could not write the export file."
             }
