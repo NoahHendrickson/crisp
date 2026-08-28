@@ -93,6 +93,10 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(exportFormat.rawValue, forKey: ExportFormat.defaultsKey) }
     }
     @Published var recordings: [Recording] = []
+    /// Sidebar summaries by folder, refreshed with `recordings` — computing
+    /// one stats files and decodes plan.json, which must not happen in row
+    /// bodies (the sidebar re-renders on every ~2s thumbnail tick).
+    @Published private(set) var summaries: [URL: Recording.Summary] = [:]
     @Published var exportProgress: [URL: Double] = [:]
     /// Recordings open in a zoom editor window. A `Recording` is identified
     /// by its folder URL, so renaming one that is open would strand the
@@ -147,7 +151,7 @@ final class AppModel: ObservableObject {
     // MARK: - Content discovery & previews
 
     func refresh() {
-        recordings = Recording.loadAll()
+        reloadRecordings()
         observeActivation()
         // onAppear can fire more than once; never stack probes — each
         // ScreenCaptureKit / CGRequestScreenCaptureAccess call can show the
@@ -667,7 +671,7 @@ final class AppModel: ObservableObject {
             }
         }
         cleanupAfterStop()
-        recordings = Recording.loadAll()
+        reloadRecordings()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -754,7 +758,7 @@ final class AppModel: ObservableObject {
                 }
                 await MainActor.run { [weak self] in
                     self?.clearExport(recording.folder)
-                    self?.recordings = Recording.loadAll()
+                    self?.reloadRecordings()
                     NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
             } catch is Renderer.Cancelled {
@@ -783,8 +787,20 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([recording.masterURL])
     }
 
+    private func reloadRecordings() {
+        recordings = Recording.loadAll()
+        summaries = Dictionary(uniqueKeysWithValues: recordings.map { ($0.folder, $0.summary) })
+    }
+
     func editorOpened(_ folder: URL) { openEditors.insert(folder) }
-    func editorClosed(_ folder: URL) { openEditors.remove(folder) }
+
+    func editorClosed(_ folder: URL) {
+        openEditors.remove(folder)
+        // The editor autosaves plan.json; refresh the sidebar's zoom counts.
+        if let recording = recordings.first(where: { $0.folder == folder }) {
+            summaries[folder] = recording.summary
+        }
+    }
 
     /// Why `recording` can't be renamed right now, or nil when it can. Every
     /// consumer holds the folder URL, so the move must wait until nothing
@@ -815,12 +831,12 @@ final class AppModel: ObservableObject {
         } catch {
             return
         }
-        recordings = Recording.loadAll()
+        reloadRecordings()
     }
 
     func delete(_ recording: Recording) {
         try? FileManager.default.trashItem(at: recording.folder, resultingItemURL: nil)
-        recordings = Recording.loadAll()
+        reloadRecordings()
     }
 
 }

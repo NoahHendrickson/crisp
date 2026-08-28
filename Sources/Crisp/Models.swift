@@ -296,22 +296,28 @@ struct Recording: Identifiable, Equatable {
     /// What the library sidebar shows under a recording's name: the container
     /// and size of the newest file (latest export, else the master), plus the
     /// zoom and step counts of the current plan.json.
+    ///
+    /// Computing one stats files and decodes plan.json — AppModel caches them
+    /// per folder so view bodies never touch the disk.
     struct Summary: Equatable {
         var format: String
         var fileSize: Int64?
         var zoomCount: Int
         var stepCount: Int
+        var hasExport: Bool
     }
 
     var summary: Summary {
-        let url = exportURLs.last ?? masterURL
+        let exports = exportURLs
+        let url = exports.last ?? masterURL
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
         let segments = loadPlanSegments() ?? []
         return Summary(
             format: url.pathExtension.uppercased(),
             fileSize: size,
             zoomCount: segments.count,
-            stepCount: segments.reduce(0) { $0 + $1.steps.count }
+            stepCount: segments.reduce(0) { $0 + $1.steps.count },
+            hasExport: !exports.isEmpty
         )
     }
 
