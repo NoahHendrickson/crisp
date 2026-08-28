@@ -598,9 +598,9 @@ enum SelfTest {
             }
         }
         let baked = planner.keyframes(from: [seg], duration: duration)
-        let final = ZoomPlanner.evaluate(baked, at: duration).zoom
-        guard abs(final - 2.0) < 1e-6 else {
-            throw SelfTestError.compare(String(format: "end-of-video hold not held by the follower: %.2f× at the end", final))
+        let endZoom = ZoomPlanner.evaluate(baked, at: duration).zoom
+        guard abs(endZoom - 2.0) < 1e-6 else {
+            throw SelfTestError.compare(String(format: "end-of-video hold not held by the follower: %.2f× at the end", endZoom))
         }
     }
 
