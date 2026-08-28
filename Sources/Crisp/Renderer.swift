@@ -14,7 +14,14 @@ final class Renderer {
 
     struct Cancelled: Error {}
 
-    var isCancelled = false
+    /// Set from the main thread while the export loop reads it from its
+    /// detached task — lock-guarded so the write is guaranteed visible.
+    var isCancelled: Bool {
+        get { cancelLock.withLock { cancelled } }
+        set { cancelLock.withLock { cancelled = newValue } }
+    }
+    private let cancelLock = NSLock()
+    private var cancelled = false
 
     private let ciContext: CIContext = {
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -100,7 +107,19 @@ final class Renderer {
         let frameCount = max(1, Int(duration * fps))
 
         var currentFrame: CIImage?
-        var pendingSample: CMSampleBuffer? = readerOutput.copyNextSampleBuffer()
+        var composedAnything = false
+        // copyNextSampleBuffer returns nil both at end-of-file and when the
+        // reader fails (a corrupt master): the failure must throw, or every
+        // remaining output frame silently duplicates the last decoded one
+        // and a frozen export is declared a success.
+        func nextSample() throws -> CMSampleBuffer? {
+            if let sample = readerOutput.copyNextSampleBuffer() { return sample }
+            guard reader.status != .failed else {
+                throw reader.error ?? RenderError.readerFailed
+            }
+            return nil
+        }
+        var pendingSample: CMSampleBuffer? = try nextSample()
 
         for frameIndex in 0..<frameCount {
             if isCancelled { throw Cancelled() }
@@ -113,7 +132,7 @@ final class Renderer {
                 if let imageBuffer = CMSampleBufferGetImageBuffer(sample) {
                     currentFrame = CIImage(cvPixelBuffer: imageBuffer)
                 }
-                pendingSample = readerOutput.copyNextSampleBuffer()
+                pendingSample = try nextSample()
             }
             guard let source = currentFrame else {
                 // No frame decoded yet; skip until the first one arrives.
@@ -121,9 +140,16 @@ final class Renderer {
             }
 
             let composed = composer.compose(source: source, at: t)
+            composedAnything = true
 
-            // Wait for the writer to drain (offline export, simple polling is fine).
+            // Wait for the writer to drain (offline export, simple polling is
+            // fine) — but bail on cancel or writer death (disk full), which
+            // otherwise leave isReadyForMoreMediaData false forever.
             while !input.isReadyForMoreMediaData {
+                if isCancelled { throw Cancelled() }
+                guard writer.status == .writing else {
+                    throw writer.error ?? RenderError.writerFailed
+                }
                 try await Task.sleep(nanoseconds: 4_000_000)
             }
 
@@ -143,6 +169,7 @@ final class Renderer {
             }
         }
 
+        guard composedAnything else { throw RenderError.readerFailed }
         input.markAsFinished()
         await writer.finishWriting()
         if let error = writer.error { throw error }
