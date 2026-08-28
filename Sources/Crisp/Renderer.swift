@@ -12,10 +12,6 @@ import VideoToolbox
 /// must keep animating even when the source is static).
 final class Renderer {
 
-    struct Cancelled: Error {}
-
-    var isCancelled = false
-
     private let ciContext: CIContext = {
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
         return CIContext(options: [
@@ -100,10 +96,21 @@ final class Renderer {
         let frameCount = max(1, Int(duration * fps))
 
         var currentFrame: CIImage?
-        var pendingSample: CMSampleBuffer? = readerOutput.copyNextSampleBuffer()
+        // copyNextSampleBuffer returns nil both at end-of-file and when the
+        // reader fails (a corrupt master): the failure must throw, or every
+        // remaining output frame silently duplicates the last decoded one
+        // and a frozen export is declared a success.
+        func nextSample() throws -> CMSampleBuffer? {
+            if let sample = readerOutput.copyNextSampleBuffer() { return sample }
+            guard reader.status != .failed else {
+                throw reader.error ?? RenderError.readerFailed
+            }
+            return nil
+        }
+        var pendingSample: CMSampleBuffer? = try nextSample()
 
         for frameIndex in 0..<frameCount {
-            if isCancelled { throw Cancelled() }
+            try Task.checkCancellation()
 
             let t = Double(frameIndex) / fps
 
@@ -113,7 +120,7 @@ final class Renderer {
                 if let imageBuffer = CMSampleBufferGetImageBuffer(sample) {
                     currentFrame = CIImage(cvPixelBuffer: imageBuffer)
                 }
-                pendingSample = readerOutput.copyNextSampleBuffer()
+                pendingSample = try nextSample()
             }
             guard let source = currentFrame else {
                 // No frame decoded yet; skip until the first one arrives.
@@ -122,8 +129,15 @@ final class Renderer {
 
             let composed = composer.compose(source: source, at: t)
 
-            // Wait for the writer to drain (offline export, simple polling is fine).
+            // Wait for the writer to drain (offline export, simple polling is
+            // fine) — but bail on cancel or writer death (disk full), which
+            // otherwise leave isReadyForMoreMediaData false forever.
+            // (Task.sleep also throws as soon as the task is cancelled.)
             while !input.isReadyForMoreMediaData {
+                try Task.checkCancellation()
+                guard writer.status == .writing else {
+                    throw writer.error ?? RenderError.writerFailed
+                }
                 try await Task.sleep(nanoseconds: 4_000_000)
             }
 
@@ -143,6 +157,7 @@ final class Renderer {
             }
         }
 
+        guard currentFrame != nil else { throw RenderError.emptyMaster }
         input.markAsFinished()
         await writer.finishWriting()
         if let error = writer.error { throw error }
@@ -194,10 +209,11 @@ final class Renderer {
     }
 
     enum RenderError: LocalizedError {
-        case noVideoTrack, readerFailed, writerFailed
+        case noVideoTrack, emptyMaster, readerFailed, writerFailed
         var errorDescription: String? {
             switch self {
             case .noVideoTrack: return "The master file has no video track."
+            case .emptyMaster: return "The master file contains no frames."
             case .readerFailed: return "Could not read the master file."
             case .writerFailed: return "Could not write the export file."
             }

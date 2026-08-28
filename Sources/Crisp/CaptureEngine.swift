@@ -43,6 +43,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     private var input: AVAssetWriterInput?
     private var sessionStarted = false
     private var lastPTS: CMTime = .invalid
+    /// Set when the writer died mid-recording (append failure): `stop()`
+    /// rethrows it so no caller mistakes the discarded file for a clean stop.
+    private var abortError: Error?
 
     /// Host-clock seconds of the first written frame; set once the session starts.
     private(set) var sessionStartHostSeconds: Double?
@@ -122,9 +125,19 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         self.lastPTS = .invalid
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-        self.stream = stream
-        try await stream.startCapture()
+        do {
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            self.stream = stream
+            try await stream.startCapture()
+        } catch {
+            // startCapture is where a stale permission grant fails: don't
+            // leave the opened writer (and its output file) dangling.
+            self.stream = nil
+            self.writer = nil
+            self.input = nil
+            writer.cancelWriting()
+            throw error
+        }
     }
 
     func stop() async throws {
@@ -136,13 +149,30 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 guard let writer, let input else {
-                    cont.resume()
+                    // The writer already died mid-recording (see the append-
+                    // failure path): its file was discarded, so report the
+                    // failure rather than a clean stop.
+                    if let abortError {
+                        self.abortError = nil
+                        cont.resume(throwing: sessionStarted && lastPTS.isValid
+                            ? abortError : CaptureError.noFramesCaptured)
+                    } else {
+                        cont.resume()
+                    }
                     return
                 }
+                self.writer = nil
+                self.input = nil
                 input.markAsFinished()
-                if sessionStarted, lastPTS.isValid {
-                    writer.endSession(atSourceTime: lastPTS)
+                guard sessionStarted, lastPTS.isValid else {
+                    // No complete frame ever arrived: finalizing a writer
+                    // whose session never started is undefined, and the file
+                    // would only be a dead entry in the library.
+                    writer.cancelWriting()
+                    cont.resume(throwing: CaptureError.noFramesCaptured)
+                    return
                 }
+                writer.endSession(atSourceTime: lastPTS)
                 writer.finishWriting {
                     if let error = writer.error {
                         cont.resume(throwing: error)
@@ -150,8 +180,6 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
                         cont.resume()
                     }
                 }
-                self.writer = nil
-                self.input = nil
             }
         }
     }
@@ -216,8 +244,21 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         if input.isReadyForMoreMediaData {
-            input.append(sampleBuffer)
-            lastPTS = pts
+            if input.append(sampleBuffer) {
+                lastPTS = pts
+            } else {
+                // The writer died mid-recording (disk full is the classic
+                // case). Surface it now rather than at Stop — otherwise the
+                // app keeps showing "Recording…" while writing nothing. A
+                // failed writer can't be finalized, so cancel it (discarding
+                // its file) and keep the error for `stop()` to rethrow.
+                let error = writer.error ?? CaptureError.writerFailed
+                self.writer = nil
+                self.input = nil
+                self.abortError = error
+                writer.cancelWriting()
+                onStreamError?(error)
+            }
         }
     }
 
@@ -225,8 +266,14 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         onStreamError?(error)
     }
 
-    enum CaptureError: LocalizedError {
+    enum CaptureError: LocalizedError, Equatable {
         case writerFailed
-        var errorDescription: String? { "Could not start the video writer." }
+        case noFramesCaptured
+        var errorDescription: String? {
+            switch self {
+            case .writerFailed: return "Could not write the video file."
+            case .noFramesCaptured: return "No frames were captured."
+            }
+        }
     }
 }

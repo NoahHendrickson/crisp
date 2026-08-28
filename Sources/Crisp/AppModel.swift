@@ -93,12 +93,18 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(exportFormat.rawValue, forKey: ExportFormat.defaultsKey) }
     }
     @Published var recordings: [Recording] = []
+    /// Sidebar summaries by folder, refreshed with `recordings` — computing
+    /// one stats files and decodes plan.json, which must not happen in row
+    /// bodies (the sidebar re-renders on every ~2s thumbnail tick).
+    @Published private(set) var summaries: [URL: Recording.Summary] = [:]
     @Published var exportProgress: [URL: Double] = [:]
     /// Recordings open in a zoom editor window. A `Recording` is identified
     /// by its folder URL, so renaming one that is open would strand the
     /// editor's autosaves; `renameBlocker` refuses until it closes.
     @Published private(set) var openEditors: Set<URL> = []
-    private var exportRenderers: [URL: Renderer] = [:]
+    /// In-flight exports by folder; `cancelExport` cancels the task and the
+    /// render loop bails at its next `Task.checkCancellation`.
+    private var exportTasks: [URL: Task<Void, Never>] = [:]
     @Published var thumbnails: [ThumbKey: CGImage] = [:]
     /// Sharper capture for the large source preview; picker thumbs stay small.
     @Published var livePreview: CGImage?
@@ -115,6 +121,15 @@ final class AppModel: ObservableObject {
     private var currentFolder: URL?
     private var currentSource: CaptureSource?
     private var startedAt: Date?
+    /// `startRecording` suspends across the stream launch and `state` only
+    /// flips once it succeeds; without this guard a second ⌘R in that
+    /// window would start a second session over the first.
+    private var isStartingRecording = false
+    /// The in-flight teardown, if any. Concurrent stops (⌘R racing the
+    /// quit-time stop, or a stream error racing either) await it instead of
+    /// tearing the same session down twice — and the quit path must not
+    /// reply "terminate" until the master's moov atom is written.
+    private var stopTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     private var accessCheckTask: Task<Void, Never>?
     private var activationObserver: (any NSObjectProtocol)?
@@ -138,7 +153,7 @@ final class AppModel: ObservableObject {
     // MARK: - Content discovery & previews
 
     func refresh() {
-        recordings = Recording.loadAll()
+        reloadRecordings()
         observeActivation()
         // onAppear can fire more than once; never stack probes — each
         // ScreenCaptureKit / CGRequestScreenCaptureAccess call can show the
@@ -510,6 +525,9 @@ final class AppModel: ObservableObject {
     }
 
     func startRecording() async {
+        guard !isStartingRecording, !isRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
         guard hasScreenAccess else {
             state = .error("Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch.")
             return
@@ -531,8 +549,14 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        let folder: URL
         do {
-            let folder = try Recording.newFolder()
+            folder = try Recording.newFolder()
+        } catch {
+            state = .error("Could not start recording: \(error.localizedDescription)")
+            return
+        }
+        do {
             let engine = CaptureEngine()
             let tracker = MouseTracker()
 
@@ -541,10 +565,13 @@ final class AppModel: ObservableObject {
                     tracker.markSessionStart(hostSeconds: hostSeconds)
                 }
             }
-            engine.onStreamError = { [weak self] error in
-                DispatchQueue.main.async {
-                    self?.state = .error("Recording stopped: \(error.localizedDescription)")
-                    self?.cleanupAfterStop()
+            engine.onStreamError = { [weak self, weak engine] error in
+                Task { @MainActor in
+                    // Only the engine that is still the live session may
+                    // trigger salvage: a late error from an already-replaced
+                    // stream must not stop (or delete) a newer recording.
+                    guard let self, let engine, self.engine === engine else { return }
+                    await self.salvageAfterStreamError(error)
                 }
             }
 
@@ -571,43 +598,125 @@ final class AppModel: ObservableObject {
             // Get out of the way of what's being recorded.
             NSApp.hide(nil)
         } catch {
+            // Don't leave the freshly created folder (and any zero-frame
+            // master.mov in it) as a dead entry in the library.
+            try? FileManager.default.removeItem(at: folder)
             state = .error("Could not start recording: \(error.localizedDescription)")
         }
     }
 
     func stopRecording() async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
+        await beginStop(streamError: nil)
+    }
+
+    /// The stream died out from under a recording (display unplugged, grant
+    /// revoked, writer failure): salvage what was captured — everything up
+    /// to the failure stays usable instead of being abandoned without a
+    /// moov atom. Bails when a stop is already in flight: that stop owns
+    /// the teardown.
+    private func salvageAfterStreamError(_ streamError: Error) async {
+        guard stopTask == nil else { return }
+        Self.log("stream error mid-recording: \(streamError.localizedDescription)")
+        await beginStop(streamError: streamError)
+    }
+
+    /// The one teardown envelope: guard the live session fields, run
+    /// `finishRecording` inside the published `stopTask` (which concurrent
+    /// stops and the quit path await), and clear it after.
+    private func beginStop(streamError: Error?) async {
         guard let engine, let tracker, let folder = currentFolder,
               let source = currentSource, let startedAt else { return }
+        let task = Task {
+            await finishRecording(engine: engine, tracker: tracker, folder: folder,
+                                  source: source, startedAt: startedAt, streamError: streamError)
+        }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    /// Tear the active session down: stop the tracker, finalize the writer,
+    /// and write the click log — used by Stop and by stream failure.
+    private func finishRecording(
+        engine: CaptureEngine, tracker: MouseTracker, folder: URL,
+        source: CaptureSource, startedAt: Date, streamError: Error?
+    ) async {
         tracker.stop()
+        var failure: Error?
         do {
             try await engine.stop()
-            let meta = RecordingMeta(
-                source: source.kindName,
-                displayID: source.displayID,
-                pixelWidth: engine.pixelWidth,
-                pixelHeight: engine.pixelHeight,
-                scaleFactor: engine.scaleFactor,
-                fps: 60,
-                codec: codec.rawValue,
-                startedAt: startedAt,
-                sessionStartHostSeconds: engine.sessionStartHostSeconds ?? 0,
-                events: tracker.events,
-                samples: tracker.samples
-            )
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(meta).write(to: folder.appendingPathComponent("events.json"))
-            state = .idle
         } catch {
-            state = .error("Could not finish recording: \(error.localizedDescription)")
+            failure = error
+        }
+        let masterExists = FileManager.default.fileExists(
+            atPath: folder.appendingPathComponent("master.mov").path)
+        if let failure, failure as? CaptureEngine.CaptureError == .noFramesCaptured || !masterExists {
+            // Nothing playable was captured (zero frames, or the writer died
+            // and its file was discarded): don't leave a dead folder behind.
+            try? FileManager.default.removeItem(at: folder)
+            if let streamError {
+                state = .error("Recording stopped: \(streamError.localizedDescription)")
+            } else if failure as? CaptureEngine.CaptureError == .noFramesCaptured {
+                state = .error("Nothing was captured — the recording stopped before the first frame arrived.")
+            } else {
+                state = .error("Could not finish recording: \(failure.localizedDescription)")
+            }
+        } else {
+            // Write the click log even when finalizing threw: the events are
+            // valid in memory, and the master often is too.
+            do {
+                try writeEvents(engine: engine, tracker: tracker, folder: folder,
+                                source: source, startedAt: startedAt)
+            } catch {
+                if failure == nil { failure = error }
+            }
+            if let failure, streamError != nil {
+                Self.log("salvage after stream error also failed: \(failure.localizedDescription)")
+            }
+            if let streamError {
+                state = .error("Recording stopped: \(streamError.localizedDescription)")
+            } else if let failure {
+                state = .error("Could not finish recording: \(failure.localizedDescription)")
+            } else {
+                state = .idle
+            }
         }
         cleanupAfterStop()
-        recordings = Recording.loadAll()
+        reloadRecordings()
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func writeEvents(
+        engine: CaptureEngine, tracker: MouseTracker, folder: URL,
+        source: CaptureSource, startedAt: Date
+    ) throws {
+        let meta = RecordingMeta(
+            source: source.kindName,
+            displayID: source.displayID,
+            pixelWidth: engine.pixelWidth,
+            pixelHeight: engine.pixelHeight,
+            scaleFactor: engine.scaleFactor,
+            fps: 60,
+            codec: codec.rawValue,
+            startedAt: startedAt,
+            sessionStartHostSeconds: engine.sessionStartHostSeconds ?? 0,
+            events: tracker.events,
+            samples: tracker.samples
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(meta).write(to: folder.appendingPathComponent("events.json"))
+    }
+
     private func cleanupAfterStop() {
+        // Belt and braces: `stop()` is idempotent, and no exit path may
+        // leave the global event monitors and the 60Hz timer installed.
+        tracker?.stop()
         engine = nil
         tracker = nil
         currentFolder = nil
@@ -653,9 +762,8 @@ final class AppModel: ObservableObject {
         guard exportProgress[recording.folder] == nil else { return }
         exportProgress[recording.folder] = 0
         let renderer = Renderer()
-        exportRenderers[recording.folder] = renderer
         let format = exportFormat
-        Task.detached { [weak self] in
+        exportTasks[recording.folder] = Task.detached { [weak self] in
             do {
                 let url = try await renderer.export(recording: recording, format: format) { fraction in
                     DispatchQueue.main.async {
@@ -664,10 +772,10 @@ final class AppModel: ObservableObject {
                 }
                 await MainActor.run { [weak self] in
                     self?.clearExport(recording.folder)
-                    self?.recordings = Recording.loadAll()
+                    self?.reloadRecordings()
                     NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
-            } catch is Renderer.Cancelled {
+            } catch is CancellationError {
                 await MainActor.run { [weak self] in
                     self?.clearExport(recording.folder)
                 }
@@ -681,19 +789,57 @@ final class AppModel: ObservableObject {
     }
 
     func cancelExport(_ recording: Recording) {
-        exportRenderers[recording.folder]?.isCancelled = true
+        exportTasks[recording.folder]?.cancel()
     }
 
     private func clearExport(_ folder: URL) {
         exportProgress[folder] = nil
-        exportRenderers[folder] = nil
+        exportTasks[folder] = nil
     }
 
     func reveal(_ recording: Recording) {
         NSWorkspace.shared.activateFileViewerSelecting([recording.masterURL])
     }
 
+    /// Ignore a slow summary pass finishing after a newer reload started.
+    private var summaryGeneration = 0
+
+    private func reloadRecordings() {
+        recordings = Recording.loadAll()
+        // Summaries stat files and decode plan.json per folder — computed off
+        // the main actor, or a big library beachballs every stop, delete and
+        // rename. The previous cache stays up meanwhile, so rows show at most
+        // a beat of stale (or placeholder) info before the fresh set lands.
+        summaryGeneration += 1
+        let generation = summaryGeneration
+        let recordings = recordings
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let fresh = Dictionary(uniqueKeysWithValues: recordings.map { ($0.folder, $0.summary) })
+            await MainActor.run {
+                guard let self, generation == self.summaryGeneration else { return }
+                self.summaries = fresh
+            }
+        }
+    }
+
+    /// Recompute one folder's cached summary, off the main actor — called by
+    /// whatever rewrites its plan.json (the editor autosave), so the sidebar
+    /// counts never wait for the editor window to close.
+    func refreshSummary(for folder: URL) {
+        guard let recording = recordings.first(where: { $0.folder == folder }) else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let summary = recording.summary
+            await MainActor.run {
+                // A reload may have replaced the dictionary meanwhile; only
+                // patch a folder the sidebar still lists.
+                guard let self, self.recordings.contains(where: { $0.folder == folder }) else { return }
+                self.summaries[folder] = summary
+            }
+        }
+    }
+
     func editorOpened(_ folder: URL) { openEditors.insert(folder) }
+
     func editorClosed(_ folder: URL) { openEditors.remove(folder) }
 
     /// Why `recording` can't be renamed right now, or nil when it can. Every
@@ -725,12 +871,12 @@ final class AppModel: ObservableObject {
         } catch {
             return
         }
-        recordings = Recording.loadAll()
+        reloadRecordings()
     }
 
     func delete(_ recording: Recording) {
         try? FileManager.default.trashItem(at: recording.folder, resultingItemURL: nil)
-        recordings = Recording.loadAll()
+        reloadRecordings()
     }
 
 }

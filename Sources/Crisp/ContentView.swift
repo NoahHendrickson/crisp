@@ -654,10 +654,11 @@ struct ContentView: View {
             guard query.isEmpty || recording.name.localizedCaseInsensitiveContains(query) else {
                 return false
             }
+            let hasExport = model.summaries[recording.folder]?.hasExport ?? false
             switch libraryFilter {
             case .all: return true
-            case .exported: return recording.hasExport
-            case .unexported: return !recording.hasExport
+            case .exported: return hasExport
+            case .unexported: return !hasExport
             }
         }
     }
@@ -751,7 +752,14 @@ private struct RecordingRow: View {
     }()
 
     var body: some View {
-        let summary = recording.summary
+        // From the model's cache: computing a summary reads the disk, which
+        // must not happen here (rows re-render on every ~2s thumbnail tick).
+        // A miss (the cache refreshes off-main, a beat behind `recordings`)
+        // shows a size-less placeholder for that beat instead of touching disk.
+        let summary = model.summaries[recording.folder] ?? Recording.Summary(
+            format: recording.masterURL.pathExtension.uppercased(),
+            fileSize: nil, zoomCount: 0, stepCount: 0, hasExport: false
+        )
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 if renaming {
@@ -772,7 +780,7 @@ private struct RecordingRow: View {
             .onHover { hovering = $0 }
 
             HStack(spacing: 8) {
-                Text(fileInfo)
+                Text(fileInfo(summary))
                     .foregroundStyle(Theme.mutedForeground)
                     .lineLimit(1)
                 if summary.zoomCount > 0 || summary.stepCount > 0 {
@@ -799,8 +807,7 @@ private struct RecordingRow: View {
     }
 
     /// "MOV 50.3MB" — newest file's format and compact size.
-    private var fileInfo: String {
-        let summary = recording.summary
+    private func fileInfo(_ summary: Recording.Summary) -> String {
         guard let size = summary.fileSize else { return summary.format }
         let labeled = Self.sizeFormatter.string(fromByteCount: size)
             .replacingOccurrences(of: " ", with: "")

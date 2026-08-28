@@ -64,12 +64,11 @@ enum SelfTest {
         try writeSyntheticEvents(
             to: recording.eventsURL, width: width, height: height, duration: duration
         )
-        do {
-            let meta = try recording.loadMeta()
-            guard meta.samples.contains(where: { $0.kind == .pointer }),
-                  meta.samples.contains(where: { $0.kind == nil }) else {
-                throw SelfTestError.cursor("synthetic events missing pointer span or arrow ticks")
-            }
+        // Read + decoded once; events.json never changes after this point.
+        let meta = try recording.loadMeta()
+        guard meta.samples.contains(where: { $0.kind == .pointer }),
+              meta.samples.contains(where: { $0.kind == nil }) else {
+            throw SelfTestError.cursor("synthetic events missing pointer span or arrow ticks")
         }
 
         print("selftest: master written, exporting with zooms...")
@@ -135,14 +134,15 @@ enum SelfTest {
         }
         print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
 
-        try checkCompare(meta: try recording.loadMeta(), width: width, height: height, duration: duration)
+        try checkCompare(meta: meta, width: width, height: height, duration: duration)
 
-        try checkStaleChildren(meta: try recording.loadMeta())
-        try checkCrowdedSteps(meta: try recording.loadMeta())
-        try checkOverlappingZooms(meta: try recording.loadMeta())
+        try checkStaleChildren(meta: meta)
+        try checkCrowdedSteps(meta: meta)
+        try checkOverlappingZooms(meta: meta)
+        try checkEndOfVideoHold(meta: meta)
         print("selftest: compare diff + stacked composer ok")
 
-        try await checkAgentTools(recording: recording, meta: try recording.loadMeta(), duration: duration)
+        try await checkAgentTools(recording: recording, meta: meta, duration: duration)
         print("selftest: agent tools ok — validation, annotated frames, preview render, briefing")
 
         // Optional online leg: exercise the real AI editor loop (spends a small
@@ -158,7 +158,6 @@ enum SelfTest {
             let effort = ProcessInfo.processInfo.environment["CRISP_AI_EFFORT"]
             let tag = [model, effort].compactMap { $0 }.joined(separator: ", ")
             print("selftest: AI editor via \(provider.kind.rawValue)\(tag.isEmpty ? "" : " (\(tag))")… CLI default: \(provider.defaultModel?.id ?? "?") / \(provider.defaultEffort ?? "?"); models offered: \(provider.models.map { "\($0.id)[\($0.efforts.joined(separator: "/"))]" }.joined(separator: ", "))")
-            let meta = try recording.loadMeta()
             let planner = ZoomPlanner(width: Double(width), height: Double(height))
             let auto = planner.segments(events: meta.events, duration: duration)
             let session = try AIDirector.Session(
@@ -546,14 +545,14 @@ enum SelfTest {
     }
 
     /// Overlapping zooms: the later one takes over where its motion starts,
-    /// with strictly increasing keyframe times and no cut in the level.
+    /// with strictly increasing keyframe times, no cut in the level, and no
+    /// cut in the followed centre (the ramp blend used to disagree with the
+    /// level takeover and snap the centre mid-hold).
     private static func checkOverlappingZooms(meta: RecordingMeta) throws {
         let planner = ZoomPlanner(meta: meta)
         let duration = 10.0
-        let keys = planner.levelKeyframes(
-            from: [ZoomSegment(start: 4.0, end: 6.0, zoom: 1.5), ZoomSegment(start: 5.0, end: 8.0, zoom: 2.5)],
-            duration: duration
-        )
+        let segments = [ZoomSegment(start: 4.0, end: 6.0, zoom: 1.5), ZoomSegment(start: 5.0, end: 8.0, zoom: 2.5)]
+        let keys = planner.levelKeyframes(from: segments, duration: duration)
         for (p, q) in zip(keys, keys.dropFirst()) where q.t <= p.t {
             throw SelfTestError.compare("overlapping zooms: keyframe times not increasing at \(q.t)s")
         }
@@ -565,6 +564,41 @@ enum SelfTest {
                 throw SelfTestError.compare(String(format: "overlapping zooms: level cuts %.2f× → %.2f× at %.2fs", z0, z1, t))
             }
             t += 0.01
+        }
+        // The full camera, follower included. Between 60Hz-baked keys the
+        // centre may move at most the spring's speed cap plus the ramp
+        // blend; a takeover cut moved it a large fraction of the frame in
+        // one tick.
+        let baked = planner.keyframes(from: segments, duration: duration)
+        let maxJump = Double(meta.pixelWidth) * 0.1
+        for (p, q) in zip(baked, baked.dropFirst()) where q.t - p.t <= 1.0 / 30 {
+            let jump = hypot(q.camera.center.x - p.camera.center.x, q.camera.center.y - p.camera.center.y)
+            guard jump <= maxJump else {
+                throw SelfTestError.compare(String(format: "overlapping zooms: centre cuts %.0fpx at %.2fs", jump, q.t))
+            }
+        }
+    }
+
+    /// A hold that runs to the very end of the video keeps its level through
+    /// the last frame — the keyframe cleanup used to drop the hold key
+    /// (outEnd == end == duration) and melt the whole hold into one long
+    /// zoom-out. The auto plan hits this whenever the recording stops within
+    /// `holdAfter` of the last click.
+    private static func checkEndOfVideoHold(meta: RecordingMeta) throws {
+        let planner = ZoomPlanner(meta: meta)
+        let duration = 2.0
+        let seg = ZoomSegment(start: 0.5, end: duration, zoom: 2.0)
+        let levels = planner.levelKeyframes(from: [seg], duration: duration)
+        for t in [1.2, 1.9, duration] {
+            let zoom = ZoomPlanner.evaluate(levels, at: t).zoom
+            guard abs(zoom - 2.0) < 1e-6 else {
+                throw SelfTestError.compare(String(format: "end-of-video hold melted: %.2f× at %.2fs", zoom, t))
+            }
+        }
+        let baked = planner.keyframes(from: [seg], duration: duration)
+        let endZoom = ZoomPlanner.evaluate(baked, at: duration).zoom
+        guard abs(endZoom - 2.0) < 1e-6 else {
+            throw SelfTestError.compare(String(format: "end-of-video hold not held by the follower: %.2f× at the end", endZoom))
         }
     }
 

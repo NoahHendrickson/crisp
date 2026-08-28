@@ -219,6 +219,9 @@ struct AIPanelView: View {
     /// A moment attached to the next note (Figma 83:14758), set by the
     /// editor toolbar's "Send timestamp to chat".
     @Binding var attachedTime: Double?
+    /// Mirrors the composer's focus out to the editor, which suspends its
+    /// bare-key Space shortcut only while the user is actually typing here.
+    @Binding var composerIsFocused: Bool
     let segments: [ZoomSegment]
     let onApply: ([ZoomSegment]) -> Void
     /// Open the split preview of one reply's change: its `before` plan
@@ -240,6 +243,8 @@ struct AIPanelView: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.border).frame(width: 1)
         }
+        .onChange(of: composerFocused) { _, focused in composerIsFocused = focused }
+        .onDisappear { composerIsFocused = false }
     }
 
     private var transcript: some View {
