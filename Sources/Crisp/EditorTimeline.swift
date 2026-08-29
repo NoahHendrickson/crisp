@@ -82,7 +82,7 @@ extension EditorView {
                                 videoTrack(width: w)
                             }
                             row(icon: "magnifying-glass-plus", fallback: "plus.magnifyingglass",
-                                help: "Zooms: one bar per zoom with its level; drag a bar's edges to change when it starts and ends") {
+                                help: "Zooms: one bar per zoom with its level; drag a bar's edges to change when it starts and ends; right-click a bar to remove it") {
                                 zoomTrack(width: w)
                             }
                             row(icon: "mouse-middle-click", fallback: "cursorarrow.motionlines",
@@ -200,7 +200,7 @@ extension EditorView {
     func holdParts(for seg: ZoomSegment, x holdX: CGFloat, width holdW: CGFloat, trackWidth w: CGFloat) -> [HoldPart] {
         var edges: [(x: CGFloat, level: Double, help: String)] = [(
             holdX, seg.zoom,
-            String(format: "Zoomed %.1f× — drag the edges to change when it starts and ends; the toolbar sets the level at the playhead", seg.zoom)
+            String(format: "Zoomed %.1f× — drag the edges to change when it starts and ends; right-click to remove; the toolbar sets the level at the playhead", seg.zoom)
         )]
         for step in holdSteps(in: seg) {
             let window = stepWindow(step, in: seg)
@@ -272,6 +272,15 @@ extension EditorView {
                   : "Zoom end — drag to change where this zoom ends")
             .zIndex(3)
         }
+
+        // On top of the bar and its grips so a right-click anywhere on the
+        // zoom opens the menu; hit-testing lets left-clicks fall through so
+        // the track still scrubs and the grips still drag.
+        ZoomBarContextMenu(enabled: !aiChat.running) {
+            removeZoom(seg.id)
+        }
+        .frame(width: holdW, height: Self.rowHeight)
+        .offset(x: holdX)
     }
 
     /// A baseline zoom that the current plan no longer has: a dashed outline
@@ -551,5 +560,73 @@ private struct TimelineEdgeHandle: View {
                         }
                     }
             )
+    }
+}
+
+/// Transparent overlay that only claims right-clicks (and Control-clicks)
+/// so a zoom bar can show a context menu without stealing the track's
+/// scrub or the edge grips' drags.
+private struct ZoomBarContextMenu: NSViewRepresentable {
+    var enabled: Bool
+    var onRemove: () -> Void
+
+    func makeNSView(context: Context) -> MenuView {
+        let view = MenuView()
+        view.enabled = enabled
+        view.onRemove = onRemove
+        return view
+    }
+
+    func updateNSView(_ view: MenuView, context: Context) {
+        view.enabled = enabled
+        view.onRemove = onRemove
+    }
+
+    final class MenuView: NSView {
+        var enabled = true
+        var onRemove: (() -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard enabled, bounds.contains(point), isContextClick else { return nil }
+            return self
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            showMenu(at: convert(event.locationInWindow, from: nil))
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            guard event.modifierFlags.contains(.control) else { return }
+            showMenu(at: convert(event.locationInWindow, from: nil))
+        }
+
+        private var isContextClick: Bool {
+            // Bit 1 is the right mouse button. Control-click is a left
+            // press with the Control modifier, which macOS treats as a
+            // right-click.
+            if NSEvent.pressedMouseButtons & 2 != 0 { return true }
+            guard let event = NSApp.currentEvent else { return false }
+            return event.type == .rightMouseDown
+                || event.type == .rightMouseUp
+                || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+        }
+
+        private func showMenu(at point: NSPoint) {
+            guard enabled else { return }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            let item = NSMenuItem(
+                title: "Remove this zoom",
+                action: #selector(remove),
+                keyEquivalent: ""
+            )
+            item.target = self
+            menu.addItem(item)
+            menu.popUp(positioning: nil, at: point, in: self)
+        }
+
+        @objc private func remove() {
+            onRemove?()
+        }
     }
 }

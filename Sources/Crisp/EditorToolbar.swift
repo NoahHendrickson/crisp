@@ -217,34 +217,24 @@ extension EditorView {
     // MARK: - Pin viewport
 
     /// "Pin viewport at 0:42" (Figma 93:746): one button whose small square
-    /// carries the action and whose well shows the playhead's time.
+    /// carries the action and whose well shows the playhead's time. When the
+    /// toolbar is tight, the label drops and the square stands in for it.
     var pinControl: some View {
         let move = pinMove
         let enabled = pinMoveEnabled
         let shape = RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+        let caption = move == .pin ? "Pin viewport at" : "Unpin viewport at"
         return Button {
             switch move {
             case .pin: pinViewport()
             case .unpin: unpinViewport()
             }
         } label: {
-            HStack(spacing: 8) {
-                HStack(spacing: 4) {
-                    Icon(name: move == .pin ? "plus" : "x", size: 16, fallback: move == .pin ? "plus" : "xmark")
-                        .foregroundStyle(Theme.foreground)
-                        .frame(width: 28, height: 28)
-                        .background {
-                            shape.fill(Theme.background)
-                                .overlay(shape.strokeBorder(Theme.input, lineWidth: 1))
-                        }
-                    Text(move == .pin ? "Pin viewport at" : "Unpin viewport at")
-                        .font(Theme.font(.label12))
-                        .foregroundStyle(Theme.mutedForeground)
-                }
-                .padding(.leading, 2)
-                ToolbarField(text: shortTimecode(currentTime))
-                    .padding(.trailing, 1)
+            ViewThatFits(in: .horizontal) {
+                pinRow(move: move, caption: caption, compact: false)
+                pinRow(move: move, caption: caption, compact: true)
             }
+            .frame(minWidth: 0)
             .frame(height: ControlSizeToken.md.height)
             .background(shape.fill(Theme.iconTabsList))
             .contentShape(shape)
@@ -253,7 +243,34 @@ extension EditorView {
         .pointingHandCursor()
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
+        .accessibilityLabel("\(caption) \(shortTimecode(currentTime))")
         .tooltip(pinHelp)
+    }
+
+    func pinRow(move: PinMove, caption: String, compact: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+        return HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Icon(name: move == .pin ? "plus" : "x", size: 16, fallback: move == .pin ? "plus" : "xmark")
+                    .foregroundStyle(Theme.foreground)
+                    .frame(width: 28, height: 28)
+                    .background {
+                        shape.fill(Theme.background)
+                            .overlay(shape.strokeBorder(Theme.input, lineWidth: 1))
+                    }
+                if !compact {
+                    Text(caption)
+                        .font(Theme.font(.label12))
+                        .foregroundStyle(Theme.mutedForeground)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .padding(.leading, 2)
+            ToolbarField(text: shortTimecode(currentTime))
+                .padding(.trailing, 1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: - Overflow menu
@@ -279,9 +296,9 @@ extension EditorView {
             }
         }
         if let i = holdIndexAtPlayhead {
+            let id = segments[i].id
             items.append(DropdownItem(id: "remove", label: "Remove this zoom") {
-                guard segments.indices.contains(i) else { return }
-                segments.remove(at: i)
+                removeZoom(id)
             })
         } else {
             items.append(DropdownItem(id: "add", label: "Add a zoom here",
@@ -299,17 +316,41 @@ extension EditorView {
 
 /// "Zoom  −  1.8×  +" (Figma 93:697): a muted group with the level in a
 /// well between two 12pt steppers, in tenths, clamped to the editor's range.
+/// When the toolbar is tight, the word "Zoom" becomes a magnifying glass.
 struct LevelStepper: View {
     @Binding var level: Double
     let range: ClosedRange<Double>
     @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-        HStack(spacing: 0) {
+        ViewThatFits(in: .horizontal) {
+            chrome { zoomCaption(compact: false) }
+            chrome { zoomCaption(compact: true) }
+        }
+        .frame(minWidth: 0)
+        .opacity(isEnabled ? 1 : 0.5)
+    }
+
+    @ViewBuilder
+    private func zoomCaption(compact: Bool) -> some View {
+        if compact {
+            Icon(name: "magnifying-glass", size: 16, fallback: "magnifyingglass")
+                .foregroundStyle(Theme.mutedForeground)
+                .padding(.horizontal, 8)
+                .accessibilityLabel("Zoom")
+        } else {
             Text("Zoom")
                 .font(Theme.font(.label12))
                 .foregroundStyle(Theme.mutedForeground)
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 8)
+        }
+    }
+
+    private func chrome<Caption: View>(@ViewBuilder caption: () -> Caption) -> some View {
+        HStack(spacing: 0) {
+            caption()
             HStack(spacing: 4) {
                 step(icon: "minus", fallback: "minus", help: "Zoom out a little",
                      disabled: level <= range.lowerBound + 0.001) {
@@ -323,9 +364,9 @@ struct LevelStepper: View {
             }
             .padding(.horizontal, 7)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .frame(height: ControlSizeToken.md.height)
         .background(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).fill(Theme.iconTabsList))
-        .opacity(isEnabled ? 1 : 0.5)
     }
 
     private func step(icon: String, fallback: String, help: String, disabled: Bool, action: @escaping () -> Void) -> some View {

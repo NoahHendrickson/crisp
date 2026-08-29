@@ -31,6 +31,10 @@ extension EditorView {
         segments.append(ZoomSegment(start: start, end: end, zoom: ZoomPlanner.Config().zoomLevel))
     }
 
+    func removeZoom(_ id: UUID) {
+        segments.removeAll { $0.id == id }
+    }
+
     func planner() -> ZoomPlanner {
         plannerCache ?? ZoomPlanner(width: 1, height: 1)
     }
