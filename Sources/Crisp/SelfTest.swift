@@ -312,6 +312,68 @@ enum SelfTest {
               obj["clickClusters"] != nil, obj["currentPlanTiming"] != nil, obj["cursorPath"] != nil else {
             throw SelfTestError.agentTools("context.json missing sections")
         }
+        guard let summary = obj["summary"] as? [String: Any], summary["pace"] != nil, summary["zoomedPercent"] != nil,
+              let stretches = obj["stretches"] as? [[String: Any]], !stretches.isEmpty,
+              stretches[0]["kind"] != nil, stretches[0]["coveredByZooms"] != nil,
+              let timing = obj["currentPlanTiming"] as? [[String: Any]], timing.first?["panWidthsPerSecond"] != nil else {
+            throw SelfTestError.agentTools("context.json missing summary / stretches / pan figures")
+        }
+        guard output.contains("Rhythm:"), output.contains("widths/s") else {
+            throw SelfTestError.agentTools("validate output has no rhythm line or pan figures: \(output.suffix(300))")
+        }
+        try checkBusyRecording(meta: meta)
+    }
+
+    /// A long, hectic recording: the stills must reach its end instead of
+    /// stopping at the first dozen zooms; the summary must call it hectic
+    /// and see the automatic plan's back-to-back zooms; a stretch of clicks
+    /// wandering the screen must say it cannot be held without panning,
+    /// and a tight one must fit at the top level.
+    private static func checkBusyRecording(meta: RecordingMeta) throws {
+        var busy = meta
+        busy.events = []
+        busy.samples = []
+        let duration = 300.0
+        var t = 1.0
+        var i = 0
+        while t < duration - 1 {
+            let x = Double((i * 397) % meta.pixelWidth)
+            let y = Double((i * 251) % meta.pixelHeight)
+            busy.events.append(MouseEvent(t: t, kind: .leftDown, x: x, y: y))
+            busy.events.append(MouseEvent(t: t + 0.1, kind: .leftUp, x: x, y: y))
+            t += 4
+            i += 1
+        }
+        let planner = ZoomPlanner(meta: busy)
+        let auto = planner.segments(events: busy.events, duration: duration)
+        guard auto.count > 20 else { throw SelfTestError.agentTools("busy: only \(auto.count) automatic zooms") }
+
+        let moments = AgentTools.frameMoments(meta: busy, segments: auto, duration: duration)
+        guard moments.count == AgentTools.maxFrames, let last = moments.last, last.t > duration * 0.8,
+              moments.filter({ $0.priority == 1 }).count >= 8, moments.contains(where: { $0.priority == 2 }),
+              zip(moments, moments.dropFirst()).allSatisfy({ $0.t < $1.t }) else {
+            throw SelfTestError.agentTools("busy: stills do not span the recording: \(moments.map(\.t))")
+        }
+        let context = AgentPlan.context(meta: busy, duration: duration, segments: auto, frames: [])
+        let summary = context.summary
+        guard summary.pace == "hectic", summary.zooms == auto.count, summary.zoomedPercent > 50,
+              summary.longestRunOfZooms == auto.count, summary.clicksByMinute.count == 5 else {
+            throw SelfTestError.agentTools("busy: summary off: \(summary)")
+        }
+        guard context.stretches.count == 1, context.stretches[0].kind == "spread",
+              context.stretches[0].maxZoomWithoutPanning == nil,
+              context.stretches[0].coveredByZooms.count == auto.count else {
+            throw SelfTestError.agentTools("busy: stretches off: \(context.stretches)")
+        }
+        guard planner.maxZoomWithoutPanning(over: CGRect(x: 100, y: 100, width: 40, height: 20)) == ZoomPlanner.zoomRange.upperBound else {
+            throw SelfTestError.agentTools("busy: a tight stretch should fit at the top level")
+        }
+        guard AgentPlan.rhythm(of: auto, meta: busy, duration: duration).contains("OVER TARGET") else {
+            throw SelfTestError.agentTools("busy: rhythm line does not flag the automatic plan")
+        }
+        guard !AgentPlan.rhythm(of: [], meta: busy, duration: duration).contains("OVER TARGET") else {
+            throw SelfTestError.agentTools("busy: rhythm line flags an empty plan")
+        }
     }
 
     /// A moving box over a slow diagonal gradient — the gradient is exactly the
