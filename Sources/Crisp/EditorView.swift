@@ -41,26 +41,55 @@ private struct PlayerLayerView: NSViewRepresentable {
     }
 }
 
-/// Post-recording zoom editor: video preview with zooms applied live, a
-/// toolbar that edits the zoom level and framing at the playhead, and a
-/// three-row timeline (video, zooms, framing). Edits autosave to plan.json,
-/// which "Export with zooms" then uses instead of the auto plan.
+/// Post-recording editor: video preview with zooms applied live, a
+/// toolbar that edits the zoom level, framing, clips and speed-ups at the
+/// playhead, and a five-row timeline (video with its trim, zooms, framing,
+/// clips, speed-ups).
+/// Edits autosave to plan.json, which the exports then use instead of the
+/// auto plan.
 struct EditorView: View {
     let folder: URL
 
     @EnvironmentObject var model: AppModel
     @State var meta: RecordingMeta?
     @State var duration: Double = 1
+    /// The master's duration in its own timescale. The preview composition's
+    /// instruction must cover the video track exactly — rebuilding a CMTime
+    /// from `duration` can land a tick short and AVFoundation then rejects
+    /// the whole composition (black preview).
+    @State var assetDuration: CMTime = CMTime(value: 60, timescale: 600)
 
     @State var segments: [ZoomSegment] = []
+    /// The zoom started from the toolbar and still waiting for its end. It
+    /// sits in `segments` with a provisional end (the next zoom or the end
+    /// of the video) until End zoom closes it — the plan never carries an
+    /// open-ended zoom the way it does an open pin or clip.
+    @State var openZoomID: UUID?
     /// How the cursor is drawn, per recording; saved with the plan.
     @State var cursorStyle: CursorStyle = .classic
+    /// The stretch the whole-video export keeps. Saved with the plan.
+    @State var trim = Trim()
+    /// Stretches that export as files of their own. Saved with the plan;
+    /// the whole-video export ignores them.
+    @State var clips: [Clip] = []
+    /// Stretches every export fast-forwards. Saved with the plan; the
+    /// preview approximates them by boosting the playback rate.
+    @State var speeds: [SpeedWindow] = []
+    /// The rate the next speed-up starts with — what the toolbar's rate
+    /// button shows while the playhead isn't on a speed-up.
+    @State var speedRate: Double = SpeedWindow.defaultRate
+    /// Draw the rate in the video's bottom-right corner while a speed-up
+    /// plays (preview and exports). Saved with the plan.
+    @State var speedBadge = false
     /// A keyframe being dragged along the timeline, with the time it had
     /// when the drag began so it tracks the pointer instead of jumping to it.
     struct TimelineDrag {
         enum Target: Equatable {
             case zoomStart(UUID), zoomEnd(UUID)
             case pinStart(segment: UUID, pin: UUID), pinEnd(segment: UUID, pin: UUID)
+            case clipStart(UUID), clipEnd(UUID)
+            case speedStart(UUID), speedEnd(UUID)
+            case trimStart, trimEnd
         }
         let target: Target
         let origin: Double
@@ -73,10 +102,14 @@ struct EditorView: View {
     /// One planner per recording: it sorts the click log once.
     @State var plannerCache: ZoomPlanner?
     @State var player = AVPlayer()
+    /// Preview transport speed: cycles 1× → 2× → 4× → 1× from the button
+    /// under Play. Export is always 1×; this only affects the editor player.
+    @State var playbackRate: Float = 1
     @State var currentTime: Double = 0
     @State var timeObserver: Any?
     @State var loadError: String?
     @State var rebuildTask: Task<Void, Never>?
+    @State var saveTask: Task<Void, Never>?
     /// What the preview shows (the IconTabList on the toolbar): the real
     /// zoomed camera, or the full frame with an editable crop box.
     enum ViewMode: String, CaseIterable, Identifiable {
@@ -107,8 +140,9 @@ struct EditorView: View {
     @State var windowGrown: CGFloat = 0
 
     var recording: Recording { Recording(folder: folder) }
-    /// Wide enough for the toolbar with an export running.
-    let baseMinWidth: CGFloat = 1000
+    /// Wide enough for the toolbar (its controls compacted) with an export
+    /// running.
+    let baseMinWidth: CGFloat = 1260
     /// Extra height so each half of the stacked compare view stays usable.
     static let compareExpansion: CGFloat = 220
 
@@ -143,6 +177,7 @@ struct EditorView: View {
                             meta: meta,
                             duration: duration,
                             attachedTime: $aiAttachedTime,
+                            currentTime: currentTime,
                             composerIsFocused: $aiComposerFocused,
                             segments: segments,
                             onApply: { loadPlan($0) },
@@ -159,7 +194,7 @@ struct EditorView: View {
         }
         .font(Theme.font(.body12))
         .foregroundStyle(Theme.foreground)
-        .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 688)
+        .frame(minWidth: showAIPanel ? baseMinWidth + AIPanelView.width : baseMinWidth, minHeight: 744)
         .background(Theme.background)
         .background(WindowChrome())
         .background(EditorWindowHandleView(handle: windowHandle))
@@ -186,6 +221,17 @@ struct EditorView: View {
             player.currentItem?.videoComposition = makeComposition()
         }
         .onChange(of: cursorStyle) { _, _ in scheduleRebuild() }
+        .onChange(of: clips) { _, _ in schedulePlanSave() }
+        .onChange(of: speeds) { _, _ in
+            // The badge windows are baked into the preview composition.
+            if speedBadge { player.currentItem?.videoComposition = makeComposition() }
+            schedulePlanSave()
+        }
+        .onChange(of: speedBadge) { _, _ in
+            player.currentItem?.videoComposition = makeComposition()
+            schedulePlanSave()
+        }
+        .onChange(of: trim) { _, _ in schedulePlanSave() }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             // Compare playback that ran into the end of the master wraps
             // around to the first edited window instead of stopping.
@@ -211,8 +257,13 @@ struct EditorView: View {
         Task {
             do {
                 let asset = AVURLAsset(url: recording.masterURL)
-                duration = try await asset.load(.duration).seconds
+                assetDuration = try await asset.load(.duration)
+                duration = assetDuration.seconds
                 let plan = recording.loadPlan()
+                trim = plan?.trim ?? Trim()
+                clips = plan?.clips ?? []
+                speeds = plan?.speeds ?? []
+                speedBadge = plan?.speedBadge ?? false
                 segments = plan?.segments ?? autoSegments()
                 cursorStyle = plan?.cursorStyle ?? .classic
                 cameraKeys = planner().keyframes(from: segments, duration: duration)
@@ -225,6 +276,7 @@ struct EditorView: View {
                 ) { time in
                     currentTime = time.seconds
                     enforceCompareLoop()
+                    enforcePreviewSpeed()
                 }
             } catch {
                 loadError = "Could not load the master video: \(error.localizedDescription)"
@@ -339,12 +391,37 @@ struct EditorView: View {
             }.value
             guard !Task.isCancelled else { return }
             cameraKeys = keys
-            recording.savePlan(plan, cursorStyle: style)
-            // The sidebar caches zoom/step counts; every plan write refreshes
-            // them, so the library stays live while the editor is open.
-            model.refreshSummary(for: folder)
+            savePlanNow(segments: plan, cursorStyle: style)
             player.currentItem?.videoComposition = makeComposition()
         }
+    }
+
+    /// Debounced autosave for edits that don't move the camera (the trim
+    /// and the clips): a drag mutates them on every pointer sample; only
+    /// the last one writes.
+    func schedulePlanSave() {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            savePlanNow()
+        }
+    }
+
+    /// The plan as it stands, with `segments`/`cursorStyle` overridable by
+    /// a rebuild that baked a particular version of them.
+    func currentPlan(segments: [ZoomSegment]? = nil, cursorStyle: CursorStyle? = nil) -> ZoomPlan {
+        ZoomPlan(
+            segments: segments ?? self.segments, cursorStyle: cursorStyle ?? self.cursorStyle,
+            trim: trim, clips: clips, speeds: speeds, speedBadge: speedBadge
+        )
+    }
+
+    func savePlanNow(segments: [ZoomSegment]? = nil, cursorStyle: CursorStyle? = nil) {
+        recording.savePlan(currentPlan(segments: segments, cursorStyle: cursorStyle))
+        // The sidebar caches zoom/step counts; every plan write refreshes
+        // them, so the library stays live while the editor is open.
+        model.refreshSummary(for: folder)
     }
 
     // MARK: - Frame overlay

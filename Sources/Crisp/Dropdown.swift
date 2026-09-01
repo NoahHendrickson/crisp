@@ -10,7 +10,8 @@ import SwiftUI
 
 // MARK: - Dropdown menu (Figma 29:4731)
 
-/// One row of a `DropdownMenu`. The host closes the menu after `action`.
+/// One row of a `DropdownMenu`. The host closes the menu after `action`
+/// (unless `keepsOpen`).
 struct DropdownItem: Identifiable {
     let id: String
     var label: String
@@ -21,7 +22,18 @@ struct DropdownItem: Identifiable {
     var thumbnail: CGImage? = nil
     /// SF Symbol drawn in the thumbnail slot when there is no thumbnail.
     var placeholderSymbol: String? = nil
+    /// Draw `checked` as a leading checkbox square instead of the trailing
+    /// check — for rows that toggle a setting rather than pick one option.
+    var checkbox = false
+    /// Leave the menu open after `action` (checkbox rows toggle in place).
+    var keepsOpen = false
+    /// Render as a hairline between row groups; everything else is ignored.
+    var divider = false
     var action: () -> Void
+
+    static func divider(_ id: String) -> DropdownItem {
+        DropdownItem(id: id, label: "", divider: true, action: {})
+    }
 }
 
 /// What a `DropdownMenu` shows instead of rows when it has nothing to list
@@ -80,8 +92,8 @@ struct DropdownMenu: View {
         return n * 52 + max(0, n - 1)
     }
 
-    /// 32pt tabs + the stack gap.
-    private var headerHeight: CGFloat { header == nil ? 0 : ControlSizeToken.md.height + 4 }
+    /// 26pt underline tabs (Figma 143:1696) + the stack gap.
+    private var headerHeight: CGFloat { header == nil ? 0 : 26 + 4 }
 
     /// 4pt padding + header + rows (capped, then scrolling).
     private var thumbnailHeight: CGFloat {
@@ -92,7 +104,13 @@ struct DropdownMenu: View {
     private var rows: some View {
         let stack = VStack(spacing: isThumbnail ? 1 : 0) {
             ForEach(items) { item in
-                if isThumbnail {
+                if item.divider {
+                    Rectangle()
+                        .fill(Theme.input)
+                        .frame(height: 1)
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 3)
+                } else if isThumbnail {
                     ThumbnailRow(item: item)
                 } else {
                     DropdownRow(item: item)
@@ -197,6 +215,9 @@ struct DropdownMenu: View {
         var body: some View {
             Button(action: item.action) {
                 HStack(alignment: .center, spacing: 8) {
+                    if item.checkbox {
+                        checkboxSquare
+                    }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.label)
                             .font(Theme.font(.body12))
@@ -211,7 +232,7 @@ struct DropdownMenu: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    if item.checked {
+                    if item.checked, !item.checkbox {
                         Icon(name: "check", size: 16, fallback: "checkmark")
                             .foregroundStyle(Theme.primaryBorder)
                     }
@@ -229,6 +250,21 @@ struct DropdownMenu: View {
             .buttonStyle(.plain)
             .pointingHandCursor()
             .onHover { hovering = $0 }
+        }
+
+        /// 14pt square: primary-filled with a check when on, outlined when off.
+        private var checkboxSquare: some View {
+            let shape = RoundedRectangle(cornerRadius: 3, style: .continuous)
+            return shape
+                .fill(item.checked ? Theme.primary : Theme.background)
+                .overlay(shape.strokeBorder(item.checked ? Theme.primaryBorder : Theme.input, lineWidth: 1))
+                .overlay {
+                    if item.checked {
+                        Icon(name: "check", size: 10, fallback: "checkmark")
+                            .foregroundStyle(Theme.primaryForeground)
+                    }
+                }
+                .frame(width: 14, height: 14)
         }
     }
 }
@@ -302,9 +338,12 @@ struct DropdownButton<Label: View>: View {
 
 /// Hosts the window's dropdowns: owns the open state, draws the open menu
 /// next to its trigger, and dismisses on click-away or Escape. Apply to a
-/// window's root view.
+/// window's root view. The overlay is clipped to that view, so the menu
+/// flips to the other side of the trigger when the preferred edge doesn't
+/// fit, then clamps so the card stays on screen (same idea as tooltips).
 private struct DropdownHost: ViewModifier {
     @StateObject private var state = DropdownState()
+    private static let gap: CGFloat = 4
 
     func body(content: Content) -> some View {
         content
@@ -320,7 +359,10 @@ private struct DropdownHost: ViewModifier {
                             DropdownMenu(
                                 items: spec.items().map { item in
                                     var closing = item
-                                    closing.action = { item.action(); state.open = nil }
+                                    closing.action = {
+                                        item.action()
+                                        if !item.keepsOpen { state.open = nil }
+                                    }
                                     return closing
                                 },
                                 header: spec.header?(),
@@ -329,16 +371,43 @@ private struct DropdownHost: ViewModifier {
                             )
                             .fixedSize()
                             .alignmentGuide(.leading) { d in
-                                spec.alignment == .trailing ? d[.trailing] - rect.maxX : -rect.minX
+                                -Self.origin(
+                                    of: CGSize(width: d.width, height: d.height),
+                                    at: rect, in: geo.size,
+                                    edge: spec.edge, alignment: spec.alignment
+                                ).x
                             }
                             .alignmentGuide(.top) { d in
-                                spec.edge == .top ? d[.bottom] - (rect.minY - 4) : -(rect.maxY + 4)
+                                -Self.origin(
+                                    of: CGSize(width: d.width, height: d.height),
+                                    at: rect, in: geo.size,
+                                    edge: spec.edge, alignment: spec.alignment
+                                ).y
                             }
                         }
                         .onExitCommand { state.open = nil }
                     }
                 }
             }
+    }
+
+    /// Place `menu` next to `trigger` inside `host`: the requested edge if
+    /// it fits, the other if it doesn't, then clamped to the host.
+    private static func origin(
+        of menu: CGSize, at trigger: CGRect, in host: CGSize,
+        edge: VerticalEdge, alignment: HorizontalAlignment
+    ) -> CGPoint {
+        let xPref = alignment == .trailing ? trigger.maxX - menu.width : trigger.minX
+        let x = min(max(xPref, 0), max(0, host.width - menu.width))
+
+        let below = trigger.maxY + gap
+        let above = trigger.minY - gap - menu.height
+        let fitsBelow = below + menu.height <= host.height
+        let fitsAbove = above >= 0
+        let openBelow = edge == .bottom ? (fitsBelow || !fitsAbove) : (!fitsAbove && fitsBelow)
+        let yPref = openBelow ? below : above
+        let y = min(max(yPref, 0), max(0, host.height - menu.height))
+        return CGPoint(x: x, y: y)
     }
 }
 

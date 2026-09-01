@@ -176,6 +176,20 @@ final class AIChat: ObservableObject {
         }
     }
 
+    /// Stop the in-flight turn without clearing the conversation. A first
+    /// turn that never applied drops the session so the next send is fresh.
+    func cancel() {
+        guard running else { return }
+        turn?.cancel()
+        turn = nil
+        turnID = UUID()
+        running = false
+        if let last = messages.last, last.role == .assistant {
+            update(last.id) { $0.append(paragraph: "Cancelled.") }
+        }
+        if !hasStarted { session = nil }
+    }
+
     /// Cancel any in-flight turn and forget the conversation.
     func clear() {
         turn?.cancel()
@@ -217,8 +231,10 @@ struct AIPanelView: View {
     let meta: RecordingMeta?
     let duration: Double
     /// A moment attached to the next note (Figma 83:14758), set by the
-    /// editor toolbar's "Send timestamp to chat".
+    /// composer pill or the editor toolbar's "Send timestamp to chat".
     @Binding var attachedTime: Double?
+    /// Playhead, so the attach pill can offer the current moment.
+    let currentTime: Double
     /// Mirrors the composer's focus out to the editor, which suspends its
     /// bare-key Space shortcut only while the user is actually typing here.
     @Binding var composerIsFocused: Bool
@@ -256,7 +272,7 @@ struct AIPanelView: View {
                     }
                     ForEach(chat.messages) { message in
                         MessageRow(message: message, isLast: message.id == chat.messages.last?.id,
-                                   running: chat.running, onRevert: onApply, onCompare: onCompare)
+                                   running: chat.running, onRevert: onApply)
                             .id(message.id)
                     }
                 }
@@ -293,7 +309,51 @@ struct AIPanelView: View {
     // MARK: - Composer (Figma 29:4692)
 
     private var composer: some View {
-        composerBox
+        VStack(alignment: .leading, spacing: 8) {
+            actionPills
+            composerBox
+        }
+    }
+
+    /// Latest applied reply — Compare sits above the composer (Figma 83:14712).
+    private var lastApplied: AIMessage? {
+        chat.messages.last { $0.before != nil }
+    }
+
+    private var actionPills: some View {
+        HStack(spacing: 8) {
+            if let change = lastApplied, let before = change.before, let after = change.after {
+                ComposerChip { onCompare(before, after) } label: {
+                    HStack(spacing: 4) {
+                        Icon(name: "rows", size: 16, fallback: "rectangle.split.1x2")
+                        Text("Compare")
+                    }
+                }
+                .tooltip("Play the zooms as they were before and after this change, stacked")
+            }
+            attachTimestampPill
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .disabled(chat.running)
+    }
+
+    /// Figma 83:14716: "Attach timestamp: 0:04" + 26pt plus, sharing a 1px
+    /// `--icon/muted` hairline. Dismiss lives on the chip inside the input.
+    private var attachTimestampPill: some View {
+        HStack(spacing: -1) {
+            ComposerChip(corners: .leading(Theme.radiusSm)) {
+                attachedTime = currentTime
+            } label: {
+                Text("Attach timestamp: \(shortTimecode(currentTime))")
+                    .monospacedDigit()
+            }
+            ComposerChip(corners: .trailing(Theme.radiusSm), width: 26) {
+                attachedTime = currentTime
+            } label: {
+                Icon(name: "plus", size: 16, fallback: "plus")
+            }
+        }
+        .tooltip("Attach the playhead's moment (\(shortTimecode(currentTime))) to your next note so the agent knows exactly where you mean")
     }
 
     private var composerBox: some View {
@@ -332,22 +392,23 @@ struct AIPanelView: View {
                     .focused($composerFocused)
                     .disabled(chat.running)
                     .onSubmit(send)
-                    Button(action: send) {
+                    Button(action: { chat.running ? chat.cancel() : send() }) {
                         if chat.running {
-                            ThemedSpinner(size: 12)
+                            Icon(name: "stop-fill", size: 12, fallback: "stop.fill")
                         } else {
                             Icon(name: "arrow-return", size: 12, fallback: "return")
                         }
                     }
                     .buttonStyle(.themed(.primary, size: .xs, iconOnly: true, corners: .all(Theme.radiusMd)))
-                    .disabled(!canSend)
+                    .disabled(!chat.running && !canSend)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .tooltip(chat.hasStarted ? "Send follow-up (⌘↩)" : "Send (⌘↩)")
+                    .tooltip(chat.running ? "Stop (⌘↩)"
+                             : chat.hasStarted ? "Send follow-up (⌘↩)" : "Send (⌘↩)")
                 }
             }
             .padding(8)
             .frame(minHeight: 44)
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+            .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous).strokeBorder(Theme.input))
 
             HStack(spacing: 6) {
@@ -373,7 +434,7 @@ struct AIPanelView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
         }
-        .background(Theme.track, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+        .background(Theme.border, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
         .onAppear { composerFocused = true }
     }
 
@@ -450,7 +511,6 @@ private struct MessageRow: View {
     let isLast: Bool
     let running: Bool
     let onRevert: ([ZoomSegment]) -> Void
-    let onCompare: (_ before: [ZoomSegment], _ after: [ZoomSegment]) -> Void
 
     var body: some View {
         switch message.role {
@@ -492,23 +552,20 @@ private struct MessageRow: View {
                         .foregroundStyle(Theme.foreground)
                         .textSelection(.enabled)
                         .padding(.top, message.activities.isEmpty ? 0 : 2)
-                } else if isLast && running {
-                    Text("Thinking…")
-                        .font(Theme.font(.body12))
-                        .foregroundStyle(Theme.mutedForeground)
+                }
+                if isLast && running {
+                    HStack(spacing: 6) {
+                        ThemedSpinner(size: 12)
+                        Text("Working…")
+                    }
+                    .font(Theme.font(.body12))
+                    .foregroundStyle(Theme.mutedForeground)
                 }
                 if let before = message.before {
-                    HStack(spacing: 12) {
-                        if let after = message.after {
-                            Button("Compare") { onCompare(before, after) }
-                                .buttonStyle(.themed(.link, size: .xs))
-                                .tooltip("Play the zooms as they were before and after this change, stacked")
-                        }
-                        Button("Revert this change") { onRevert(before) }
-                            .buttonStyle(.themed(.link, size: .xs))
-                            .tooltip("Put the zooms back to how they were before this change")
-                    }
-                    .disabled(running)
+                    Button("Revert this change") { onRevert(before) }
+                        .buttonStyle(.themed(.link, size: .xs))
+                        .tooltip("Put the zooms back to how they were before this change")
+                        .disabled(running)
                 }
             }
         }
@@ -539,5 +596,37 @@ private struct MessageRow: View {
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
+    }
+}
+
+/// Composer action pill (Figma 83:14716): white well, `--icon/muted`
+/// hairline, 6pt corners, Label/12, 26pt tall.
+private struct ComposerChip<Label: View>: View {
+    var corners: RectangleCornerRadii = .all(Theme.radiusSm)
+    var width: CGFloat? = nil
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = UnevenRoundedRectangle(cornerRadii: corners, style: .continuous)
+        Button(action: action) {
+            label()
+                .font(Theme.font(.label12))
+                .foregroundStyle(Theme.foreground)
+                .padding(.horizontal, width == nil ? 6 : 0)
+                .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .frame(width: width, height: 26)
+        .fixedSize()
+        .background {
+            shape.fill(hovering ? Theme.muted : Theme.well)
+                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+        }
+        .contentShape(shape)
+        .pointingHandCursor()
+        .onHover { hovering = $0 }
     }
 }

@@ -17,6 +17,9 @@ enum Theme {
     static let textSecondary = dynamic("#55514f", "#d4d4d4")     // --text-secondary
     static let mutedForeground = dynamic("#737373", "#a1a1a1")   // --muted-foreground
     static let card = dynamic("#f8f7eb", "#2b2825")              // --card / --popover
+    /// Composer field and action pills: Figma `bg-white` on paper; in dark,
+    /// the panel itself (`--card`) so they don't lift off the page.
+    static let well = dynamic("#ffffff", "#2b2825")
     static let panel = dynamic("#eeebe2", "#2b2825")             // placeholder surfaces
     static let muted = dynamic("#23201e0f", "#ffffff14")         // ghost hover
     static let border = dynamic("#e8e4e1", "#ffffff1f")          // --border
@@ -40,6 +43,8 @@ enum Theme {
     static let zoomBar = dynamic("#47a6ff", "#47a6ff")
     static let pinBar = dynamic("#ff9a42", "#ff9a42")
     static let pinBarBorder = dynamic("#ffe19a", "#ffe19a")
+    static let clipBar = dynamic("#a96cff", "#a96cff")
+    static let speedBar = dynamic("#14b8a6", "#2dd4bf")
     static let barBorder = Color.white.opacity(0.5)
     static let ruler = dynamic("#0000003d", "#ffffff3d")
     /// Value wells in the toolbar's Zoom / Pin groups (Figma 93:745):
@@ -58,12 +63,6 @@ enum Theme {
     static let raisedShadowNear = Color.black.opacity(0.08)
     static let raisedShadowFar = Color.black.opacity(0.12)
 
-    // Tabs (Noey UI 54:372 light / 54:393 dark): flush black@8 / white@12
-    // track (rounded 6, no stroke); the active tab is paper with a
-    // foreground@12 hairline in light, white@24 with no border in dark.
-    static let tabsList = dynamic("#00000014", "#ffffff1f")
-    static let tabsActive = dynamic("#f8f7eb", "#ffffff3d")
-    static let tabsActiveBorder = dynamic("#23201e1f", "#ffffff00")
     /// IconTabList track (Figma 174:925): solid --border in light, white@12 in dark.
     static let iconTabsList = dynamic("#e8e4e1", "#ffffff1f")
 

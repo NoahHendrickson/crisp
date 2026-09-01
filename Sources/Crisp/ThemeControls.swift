@@ -243,50 +243,26 @@ struct ButtonGroupSeparator: View {
     }
 }
 
-// MARK: - Tabs (tabs.tsx, variant=default)
+// MARK: - Tabs (Figma 143:1696)
 
-/// Noey UI "Tabs List" (54:372 light / 54:393 dark; tabs.tsx variant=default):
-/// a flush muted track (black@8 / white@12, rounded 6, no stroke) of 32pt
-/// triggers (px 12, Label/12) that share the width equally (flex-1). The
-/// active tab is a raised pill (paper + foreground@12 hairline in light,
-/// white@24 with no border in dark, Shadow/raised) that slides between them.
+/// Underline tabs for the Window target menu (App Windows / Chrome Tabs).
+/// Active: Label/12 + 2pt foreground underline. Idle: Body/12 + text-secondary,
+/// with a transparent 2pt underline so the row stays 26pt.
 struct TabsPicker<Item: Identifiable & Hashable>: View {
     let items: [Item]
     @Binding var selection: Item
     let label: (Item) -> String
-    @State private var frames: [AnyHashable: CGRect] = [:]
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.radiusSm, style: .continuous)
         HStack(spacing: 0) {
             ForEach(items) { item in
                 TabTrigger(title: label(item), active: item == selection) {
                     selection = item
                 }
-                .background {
-                    GeometryReader { geo in
-                        Color.clear.preference(
-                            key: TabFramePreference.self,
-                            value: [AnyHashable(item.id): geo.frame(in: .named("tabs"))]
-                        )
-                    }
-                }
             }
         }
-        .coordinateSpace(name: "tabs")
-        .onPreferenceChange(TabFramePreference.self) { frames = $0 }
-        .background(alignment: .topLeading) {
-            if let frame = frames[AnyHashable(selection.id)] {
-                shape.fill(Theme.tabsActive)
-                    .overlay(shape.strokeBorder(Theme.tabsActiveBorder, lineWidth: 1))
-                    .raisedShadow()
-                    .frame(width: frame.width, height: frame.height)
-                    .offset(x: frame.minX, y: frame.minY)
-            }
-        }
-        .background(shape.fill(Theme.tabsList))
-        .clipShape(shape)
-        .animation(.smooth(duration: 0.22), value: selection)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 26)
     }
 
     private struct TabTrigger: View {
@@ -297,13 +273,17 @@ struct TabsPicker<Item: Identifiable & Hashable>: View {
 
         var body: some View {
             Button(action: action) {
-                Text(title)
-                    .font(Theme.font(.label12))
-                    .foregroundStyle(active || hovering ? Theme.foreground : Theme.mutedForeground)
-                    .padding(.horizontal, ControlSizeToken.md.horizontalPadding)   // px-3
-                    .frame(maxWidth: .infinity)                                   // flex-1
-                    .frame(height: ControlSizeToken.md.height)                    // h-8
-                    .contentShape(Rectangle())
+                VStack(spacing: 0) {
+                    Text(title)
+                        .font(Theme.font(active ? .label12 : .body12))
+                        .foregroundStyle(active || hovering ? Theme.foreground : Theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                    Rectangle()
+                        .fill(active ? Theme.foreground : .clear)
+                        .frame(height: 2)
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .pointingHandCursor()
@@ -431,7 +411,7 @@ struct SelectTriggerLabel: View {
 /// the source canvas is 56pt and scaled down. Steps at 10 fps; reduced
 /// motion freezes a mid-chase frame.
 struct ThemedSpinner: View {
-    var color: Color = Color(hex: "#4ADE80")
+    var color: Color = Color(hex: "#359e70")
     var size: CGFloat = 16
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

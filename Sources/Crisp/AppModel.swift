@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ScreenCaptureKit
+import AVFoundation
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -758,14 +759,48 @@ final class AppModel: ObservableObject {
 
     // MARK: - Export & library
 
+    /// Render the whole video (inside its trim) with its zooms to a new file.
     func export(_ recording: Recording) {
+        let format = exportFormat
+        runExport(recording) { renderer, report in
+            [try await renderer.export(recording: recording, format: format, progress: report)]
+        }
+    }
+
+    /// Render the plan's clips — all of them, or just `only` — each to a
+    /// file of its own, one after another; the progress bar spans the whole
+    /// run. Cancelling stops at the current clip and keeps the ones already
+    /// written.
+    func exportClips(_ recording: Recording, only: Set<UUID>? = nil) {
+        let format = exportFormat
+        runExport(recording) { renderer, report in
+            let length = try await AVURLAsset(url: recording.masterURL).load(.duration).seconds
+            let clips = (recording.loadPlan()?.clipRanges(duration: length) ?? [])
+                .filter { only?.contains($0.id) ?? true }
+            guard !clips.isEmpty else { throw Renderer.RenderError.noClips }
+            var urls: [URL] = []
+            for (i, clip) in clips.enumerated() {
+                urls.append(try await renderer.export(recording: recording, format: format, clip: clip) { fraction in
+                    report((Double(i) + fraction) / Double(clips.count))
+                })
+            }
+            return urls
+        }
+    }
+
+    /// One export at a time per recording: `job` renders with `renderer`,
+    /// reporting progress in 0…1, and returns the files it wrote, which are
+    /// revealed in the Finder when it is done.
+    private func runExport(
+        _ recording: Recording,
+        job: @escaping (Renderer, @escaping (Double) -> Void) async throws -> [URL]
+    ) {
         guard exportProgress[recording.folder] == nil else { return }
         exportProgress[recording.folder] = 0
         let renderer = Renderer()
-        let format = exportFormat
         exportTasks[recording.folder] = Task.detached { [weak self] in
             do {
-                let url = try await renderer.export(recording: recording, format: format) { fraction in
+                let urls = try await job(renderer) { fraction in
                     DispatchQueue.main.async {
                         self?.exportProgress[recording.folder] = fraction
                     }
@@ -773,7 +808,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { [weak self] in
                     self?.clearExport(recording.folder)
                     self?.reloadRecordings()
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                    NSWorkspace.shared.activateFileViewerSelecting(urls)
                 }
             } catch is CancellationError {
                 await MainActor.run { [weak self] in

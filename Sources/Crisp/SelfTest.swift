@@ -97,9 +97,9 @@ enum SelfTest {
         print("selftest: export ok — \(Int(size.width))×\(Int(size.height)), \(String(format: "%.2f", exportedDuration))s, \(bytes / 1024) KB")
 
         // Second pass: export again through an edited plan.json (the editor path).
-        recording.savePlan([
+        recording.savePlan(ZoomPlan(segments: [
             ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
-        ], cursorStyle: .bubbly)
+        ], cursorStyle: .bubbly))
         // Re-exporting (as MP4/H.264) must not overwrite the first export: it
         // should land in a numbered sibling file.
         let planURL = try await Renderer().export(recording: recording, format: .mp4H264) { _ in }
@@ -133,6 +133,12 @@ enum SelfTest {
             throw SelfTestError.badExportName(hevcURL.lastPathComponent)
         }
         print("selftest: mp4/hevc export ok — \(hevcURL.lastPathComponent)")
+
+        try await checkTrimAndClips(recording: recording, width: width, height: height, duration: duration)
+        print("selftest: trim + clip exports ok")
+
+        try await checkSpeeds(recording: recording, duration: duration)
+        print("selftest: speed-up mapping + export ok")
 
         try checkCompare(meta: meta, width: width, height: height, duration: duration)
 
@@ -451,21 +457,32 @@ enum SelfTest {
         }
     }
 
-    /// Plans without a cursor style decode as classic and encode without the
-    /// key; every style draws all three cursor kinds.
+    /// Plans without a cursor style, trim, clips or speed-ups decode to the
+    /// defaults and encode without those keys; every style draws all three
+    /// cursor kinds.
     private static func checkCursorStyle() throws {
         let legacy = try JSONDecoder().decode(ZoomPlan.self, from: Data(#"{"version":1,"segments":[]}"#.utf8))
-        guard legacy.cursorStyle == nil else {
-            throw SelfTestError.cursor("legacy plan decoded a cursor style")
+        guard legacy.cursorStyle == .classic, legacy.trim.isDefault, legacy.clips.isEmpty,
+              legacy.speeds.isEmpty else {
+            throw SelfTestError.cursor("legacy plan did not decode to the defaults")
         }
         let classic = try JSONEncoder().encode(ZoomPlan(segments: []))
         let classicObj = try JSONSerialization.jsonObject(with: classic) as? [String: Any]
-        guard classicObj?["cursorStyle"] == nil else {
-            throw SelfTestError.cursor("classic plan encoded a cursorStyle field")
+        guard classicObj?["cursorStyle"] == nil, classicObj?["trim"] == nil, classicObj?["clips"] == nil,
+              classicObj?["speeds"] == nil else {
+            throw SelfTestError.cursor("default plan encoded a cursorStyle, trim, clips or speeds field")
         }
-        let bubbly = try JSONEncoder().encode(ZoomPlan(segments: [], cursorStyle: .bubbly))
-        guard try JSONDecoder().decode(ZoomPlan.self, from: bubbly).cursorStyle == .bubbly else {
-            throw SelfTestError.cursor("bubbly cursor style did not round-trip")
+        let bubbly = try JSONEncoder().encode(ZoomPlan(
+            segments: [], cursorStyle: .bubbly,
+            trim: Trim(start: 2, end: nil), clips: [Clip(start: 1), Clip(start: 3, end: 4)],
+            speeds: [SpeedWindow(start: 1, rate: 3), SpeedWindow(start: 3, end: 4)]
+        ))
+        let decoded = try JSONDecoder().decode(ZoomPlan.self, from: bubbly)
+        guard decoded.cursorStyle == .bubbly, decoded.trim == Trim(start: 2, end: nil),
+              decoded.clips.map(\.start) == [1, 3], decoded.clips.map(\.end) == [nil, 4],
+              decoded.speeds.map(\.rate) == [3, SpeedWindow.defaultRate],
+              decoded.speeds.map(\.end) == [nil, 4] else {
+            throw SelfTestError.cursor("cursor style, trim, clips or speeds did not round-trip")
         }
         for style in CursorStyle.allCases {
             let kinds = FrameComposer.cursorKinds(drawnBy: style)
@@ -673,9 +690,158 @@ enum SelfTest {
         }
     }
 
+    /// The trim: resolved inside the video, and the whole-video export runs
+    /// only that stretch. The clips: resolved in time order with an open end
+    /// running to the next clip or the video's end, each exported as a
+    /// numbered file of its own without disturbing the whole-video exports,
+    /// and never overwriting an earlier run.
+    private static func checkTrimAndClips(
+        recording: Recording, width: Int, height: Int, duration: Double
+    ) async throws {
+        func fail(_ what: String) -> SelfTestError { .trimClips(what) }
+
+        guard Trim().range(duration: duration) == 0...duration,
+              Trim(start: -1, end: 9).range(duration: duration) == 0...duration,
+              Trim(start: 0.3, end: 1.5).range(duration: duration) == 0.3...1.5,
+              Trim(start: 1.5, end: 0.3).range(duration: duration) == 1.5...1.5 else {
+            throw fail("trim range not resolved inside the video")
+        }
+
+        let clips = [Clip(start: 1.2), Clip(start: 0.2, end: 0.9)]
+        let ranges = Clip.ranges(of: clips, duration: duration)
+        guard ranges.map(\.number) == [1, 2], ranges.map(\.start) == [0.2, 1.2], ranges.map(\.end) == [0.9, duration] else {
+            throw fail("clip ranges not resolved: \(ranges)")
+        }
+        guard Clip.ranges(of: [Clip(start: 1.2), Clip(start: 1.2, end: 1.6)], duration: duration).count == 1 else {
+            throw fail("an open clip under the next clip's start should resolve to nothing")
+        }
+
+        let trim = Trim(start: 0.3, end: 1.5)
+        let segments = [ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, pins: [PinWindow(x: 50, y: 50)])]
+        recording.savePlan(ZoomPlan(segments: segments, cursorStyle: .bubbly, trim: trim, clips: clips))
+        let wholeBefore = recording.exportURLs
+        let whole = try await Renderer().export(recording: recording) { _ in }
+        guard whole.lastPathComponent == "export 4.mov" else { throw fail("whole export named \(whole.lastPathComponent)") }
+        let wholeDuration = try await AVURLAsset(url: whole).load(.duration).seconds
+        guard abs(wholeDuration - 1.2) < 0.25 else { throw fail("trimmed export runs \(wholeDuration)s, not 1.2s") }
+
+        var clipURLs: [URL] = []
+        for range in ranges {
+            let url = try await Renderer().export(recording: recording, clip: range) { _ in }
+            clipURLs.append(url)
+            let asset = AVURLAsset(url: url)
+            let length = try await asset.load(.duration).seconds
+            guard abs(length - range.length) < 0.25 else {
+                throw fail("\(url.lastPathComponent) runs \(length)s, not \(range.length)s")
+            }
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw SelfTestError.noTrack }
+            let size = try await track.load(.naturalSize)
+            guard Int(size.width) == width, Int(size.height) == height else { throw fail("\(url.lastPathComponent) is \(size)") }
+        }
+        guard clipURLs.map(\.lastPathComponent) == ["clip 1.mov", "clip 2.mov"] else {
+            throw fail("clips named \(clipURLs.map(\.lastPathComponent))")
+        }
+        let again = try await Renderer().export(recording: recording, format: .mp4H264, clip: ranges[0]) { _ in }
+        guard again.lastPathComponent == "clip 1 (2).mp4",
+              recording.clipExportURLs == [clipURLs[0], again, clipURLs[1]],
+              recording.exportURLs == wholeBefore + [whole] else {
+            throw fail("clip re-export named \(again.lastPathComponent); clips \(recording.clipExportURLs.map(\.lastPathComponent)), exports \(recording.exportURLs.map(\.lastPathComponent))")
+        }
+        let snapshot = Recording.loadPlan(from: Recording.planSnapshotURL(for: again))
+        guard snapshot?.trim == trim, snapshot?.clips.count == 2, snapshot?.cursorStyle == .bubbly else {
+            throw fail("clip export snapshot incomplete")
+        }
+        guard recording.summary.hasExport else { throw fail("summary ignores exports") }
+        // Leave the library-shaped plan the later checks expect.
+        recording.savePlan(ZoomPlan(segments: [
+            ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
+        ], cursorStyle: .bubbly))
+    }
+
+    /// The speed-ups: resolved in time order with an open end running to the
+    /// next one or the video's end, the output timeline compressed piecewise
+    /// (one output second covers `rate` master seconds inside a window), and
+    /// the whole-video export correspondingly shorter.
+    private static func checkSpeeds(recording: Recording, duration: Double) async throws {
+        func fail(_ what: String) -> SelfTestError { .speeds(what) }
+
+        let windows = [SpeedWindow(start: 1.2, rate: 3), SpeedWindow(start: 0.2, end: 0.9, rate: 0.5)]
+        let ranges = SpeedWindow.ranges(of: windows, duration: duration)
+        guard ranges.map(\.start) == [0.2, 1.2], ranges.map(\.end) == [0.9, duration],
+              ranges.map(\.rate) == [1, 3] else {
+            throw fail("speed ranges not resolved (open end, order, sub-1 rate clamp): \(ranges)")
+        }
+        guard SpeedWindow.ranges(of: [SpeedWindow(start: 1.2), SpeedWindow(start: 1.2, end: 1.6)], duration: duration).count == 1 else {
+            throw fail("an open speed-up under the next one's start should resolve to nothing")
+        }
+
+        let sped = SpeedWindow.ranges(of: [SpeedWindow(start: 0.5, end: 1.5, rate: 4)], duration: duration)
+        guard abs(SpeedWindow.outputLength(of: 0...duration, ranges: sped) - 1.25) < 1e-9,
+              abs(SpeedWindow.outputLength(of: 1...duration, ranges: sped) - 0.625) < 1e-9 else {
+            throw fail("output length not compressed by the windows inside")
+        }
+        let probes: [(out: Double, source: Double)] = [(0.25, 0.25), (0.5, 0.5), (0.75, 1.5), (1.0, 1.75), (1.25, 2.0)]
+        for probe in probes {
+            let source = SpeedWindow.sourceTime(atOutput: probe.out, in: 0...duration, ranges: sped)
+            guard abs(source - probe.source) < 1e-9 else {
+                throw fail("output \(probe.out)s maps to master \(source)s, not \(probe.source)s")
+            }
+        }
+        guard abs(SpeedWindow.sourceTime(atOutput: 0.125, in: 1...duration, ranges: sped) - 1.5) < 1e-9 else {
+            throw fail("a window clipped by the export stretch maps wrong")
+        }
+
+        // The badge flag: omitted from JSON at its default, round-trips, and
+        // actually draws — with it, the bottom-right corner differs from the
+        // badge-less composer inside a window and matches it outside.
+        let defaultPlan = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ZoomPlan(segments: []))) as? [String: Any]
+        guard defaultPlan?["speedBadge"] == nil else { throw fail("default plan encoded speedBadge") }
+        guard try JSONDecoder().decode(
+            ZoomPlan.self, from: JSONEncoder().encode(ZoomPlan(segments: [], speedBadge: true))
+        ).speedBadge else { throw fail("speedBadge did not round-trip") }
+
+        let meta = try recording.loadMeta()
+        let keys = [ZoomPlanner.Keyframe(t: 0, camera: Camera(
+            zoom: 1, center: CGPoint(x: Double(meta.pixelWidth) / 2, y: Double(meta.pixelHeight) / 2)
+        ))]
+        let plain = FrameComposer(meta: meta, keys: keys, cursorStyle: .classic)
+        let badged = FrameComposer(meta: meta, keys: keys, cursorStyle: .classic, speedBadges: sped)
+        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+            .cropped(to: CGRect(x: 0, y: 0, width: meta.pixelWidth, height: meta.pixelHeight))
+        let ciContext = CIContext()
+        func corner(_ image: CIImage) -> Data? {
+            let rect = CGRect(x: Double(meta.pixelWidth) - 200, y: 0, width: 200, height: 80)
+            guard let cg = ciContext.createCGImage(image, from: rect),
+                  let data = cg.dataProvider?.data else { return nil }
+            return data as Data
+        }
+        guard corner(badged.compose(source: grey, at: 1.0)) != corner(plain.compose(source: grey, at: 1.0)) else {
+            throw fail("badge not drawn in the corner inside its window")
+        }
+        guard corner(badged.compose(source: grey, at: 1.9)) == corner(plain.compose(source: grey, at: 1.9)) else {
+            throw fail("badge drawn outside its window")
+        }
+
+        // A 4× speed-up over the middle second exports 2s of master as 1.25s.
+        let segments = [ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2)]
+        recording.savePlan(ZoomPlan(segments: segments, speeds: [SpeedWindow(start: 0.5, end: 1.5, rate: 4)]))
+        let url = try await Renderer().export(recording: recording) { _ in }
+        guard url.lastPathComponent == "export 5.mov" else { throw fail("sped export named \(url.lastPathComponent)") }
+        let length = try await AVURLAsset(url: url).load(.duration).seconds
+        guard abs(length - 1.25) < 0.25 else { throw fail("sped export runs \(length)s, not 1.25s") }
+        let snapshot = Recording.loadPlan(from: Recording.planSnapshotURL(for: url))
+        guard snapshot?.speeds.map(\.rate) == [4] else { throw fail("sped export snapshot lost the speed-ups") }
+        // Leave the library-shaped plan the later checks expect.
+        recording.savePlan(ZoomPlan(segments: [
+            ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2, steps: [ZoomStep(t: 0.8, zoom: 2.6)])
+        ], cursorStyle: .bubbly))
+    }
+
     enum SelfTestError: Error {
         case cursor(String)
         case compare(String)
+        case trimClips(String)
+        case speeds(String)
         case writerFailed
         case noTrack
         case badDuration(Double)

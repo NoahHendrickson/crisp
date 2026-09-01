@@ -1,14 +1,19 @@
 import SwiftUI
 import AppKit
 
-// The editor's timeline (Figma 93:1015): a ruler and three rows in one
-// card. The video row is the recording with the playhead on it; the zoom
+// The editor's timeline (Figma 93:1015): a ruler and five rows in one
+// card. The video row is the recording with the playhead on it, shaded
+// where the trim leaves it out of the whole-video export, its ends
+// draggable; the zoom
 // row has one blue bar per zoom's hold, labelled with its level (divided
 // where a step changes it) and with grips on its edges to move where the
 // zoom starts and ends; the framing row shows, for each hold, where the
 // camera follows the cursor (grey, cursor glyph) and where it holds a
-// pinned viewport (orange band, pin glyph, edges draggable). A press
-// anywhere scrubs; the toolbar above edits the moment under the playhead.
+// pinned viewport (orange band, pin glyph, edges draggable); the clip row
+// has one purple bar per clip, edges draggable; the speed row has one teal
+// bar per speed-up, labelled with its rate, edges draggable, right-click
+// to change the rate. A press anywhere scrubs; the toolbar above edits the
+// moment under the playhead.
 extension EditorView {
     // MARK: - Geometry
 
@@ -18,7 +23,7 @@ extension EditorView {
     /// "0:00" at label12 — this minus the 8pt tick gap — isn't truncated.
     static let rowInset: CGFloat = 44
     static let rulerHeight: CGFloat = 16
-    static var rowsHeight: CGFloat { rowHeight * 3 + rowGap * 2 }
+    static var rowsHeight: CGFloat { rowHeight * 5 + rowGap * 4 }
     static let barCorner: CGFloat = 8
     static let barGlyphSize: CGFloat = 12
     /// A hold part narrower than this drops its level label.
@@ -57,20 +62,31 @@ extension EditorView {
 
     var timeline: some View {
         HStack(alignment: .top, spacing: 16) {
-            Button {
-                togglePlayback()
-            } label: {
-                Icon(
-                    name: isPlaying ? "pause" : "play", size: 16,
-                    fallback: isPlaying ? "pause.fill" : "play.fill"
-                )
+            VStack(spacing: 8) {
+                Button {
+                    togglePlayback()
+                } label: {
+                    Icon(
+                        name: isPlaying ? "pause" : "play", size: 16,
+                        fallback: isPlaying ? "pause.fill" : "play.fill"
+                    )
+                }
+                .buttonStyle(.themed(.outline, size: .md, iconOnly: true))
+                // Unmodified key equivalents are matched before the focused view
+                // sees the event: while the AI panel's composer has focus, Space
+                // must type a space, not toggle playback.
+                .keyboardShortcut(aiComposerFocused ? nil : KeyboardShortcut(.space, modifiers: []))
+                .tooltip("Play / pause (Space)")
+                Button {
+                    cyclePlaybackRate()
+                } label: {
+                    Text(playbackRateLabel)
+                        .monospacedDigit()
+                }
+                .buttonStyle(.themed(.outline, size: .md, iconOnly: true))
+                .accessibilityLabel("Playback speed \(playbackRateLabel)")
+                .tooltip("Playback speed — click to cycle 1×, 2×, 4×")
             }
-            .buttonStyle(.themed(.outline, size: .md, iconOnly: true))
-            // Unmodified key equivalents are matched before the focused view
-            // sees the event: while the AI panel's composer has focus, Space
-            // must type a space, not toggle playback.
-            .keyboardShortcut(aiComposerFocused ? nil : KeyboardShortcut(.space, modifiers: []))
-            .tooltip("Play / pause (Space)")
             VStack(alignment: .leading, spacing: Self.rowGap) {
                 ruler
                 GeometryReader { geo in
@@ -78,7 +94,7 @@ extension EditorView {
                     ZStack(alignment: .topLeading) {
                         VStack(alignment: .leading, spacing: Self.rowGap) {
                             row(icon: "video-camera", fallback: "video",
-                                help: "The recording — press anywhere on the timeline to scrub") {
+                                help: "The recording — press anywhere on the timeline to scrub; drag the grips at its ends to trim what the whole-video export keeps") {
                                 videoTrack(width: w)
                             }
                             row(icon: "magnifying-glass-plus", fallback: "plus.magnifyingglass",
@@ -86,8 +102,16 @@ extension EditorView {
                                 zoomTrack(width: w)
                             }
                             row(icon: "mouse-middle-click", fallback: "cursorarrow.motionlines",
-                                help: "Framing: grey where the camera follows the cursor, orange where the viewport is pinned") {
+                                help: "Framing: grey where the camera follows the cursor, orange where the viewport is pinned; right-click a pin to remove it") {
                                 framingTrack(width: w)
+                            }
+                            row(icon: "scissors", fallback: "scissors",
+                                help: "Clips: each bar exports as a file of its own (Export → clips); drag a bar's edges to change when it starts and ends; right-click a bar to remove it") {
+                                clipTrack(width: w)
+                            }
+                            row(icon: "fast-forward", fallback: "forward",
+                                help: "Speed-ups: each bar fast-forwards its stretch in every export; drag a bar's edges to change when it starts and ends; right-click a bar to set the rate or remove it") {
+                                speedTrack(width: w)
                             }
                         }
                         playhead(width: w)
@@ -160,10 +184,55 @@ extension EditorView {
 
     // MARK: - Video row
 
+    /// The recording, shaded where the trim leaves it out, with a grip at
+    /// each end of the kept stretch.
     func videoTrack(width w: CGFloat) -> some View {
-        bar(Theme.videoBar)
-            .frame(width: w, height: Self.rowHeight)
-            .allowsHitTesting(false)
+        let kept = trimRange
+        let inX = x(of: kept.lowerBound, width: w)
+        let outX = x(of: kept.upperBound, width: w)
+
+        return ZStack(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
+                bar(Theme.videoBar)
+                    .frame(width: w, height: Self.rowHeight)
+                    .allowsHitTesting(false)
+                if inX > 0.5 {
+                    trimmedShade(x: 0, width: inX, help: "Trimmed out — the whole-video export starts at \(shortTimecode(kept.lowerBound)); drag the grip to change, or ⋮ → Reset the trim")
+                }
+                if outX < w - 0.5 {
+                    trimmedShade(x: outX, width: w - outX, help: "Trimmed out — the whole-video export stops at \(shortTimecode(kept.upperBound)); drag the grip to change, or ⋮ → Reset the trim")
+                }
+            }
+            .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
+            .clipShape(RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous))
+
+            ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+                let target: TimelineDrag.Target = edge == .leading ? .trimStart : .trimEnd
+                TimelineEdgeHandle(
+                    color: Theme.videoBar,
+                    dragging: timelineDrag?.target == target,
+                    onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                    onEnd: { timelineDrag = nil }
+                )
+                .offset(x: (edge == .leading ? inX : outX) - TimelineEdgeHandle.width / 2)
+                .tooltip(edge == .leading
+                      ? "Trim start — drag to change where the whole-video export begins"
+                      : "Trim end — drag to change where the whole-video export stops")
+                .zIndex(3)
+            }
+        }
+        .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
+    }
+
+    /// A stretch of the video row the trim leaves out; the press falls
+    /// through to the scrub.
+    func trimmedShade(x: CGFloat, width: CGFloat, help: String) -> some View {
+        Rectangle()
+            .fill(Theme.background.opacity(0.65))
+            .frame(width: width, height: Self.rowHeight)
+            .contentShape(Rectangle())
+            .offset(x: x)
+            .tooltip(help)
     }
 
     // MARK: - Zoom row
@@ -276,7 +345,7 @@ extension EditorView {
         // On top of the bar and its grips so a right-click anywhere on the
         // zoom opens the menu; hit-testing lets left-clicks fall through so
         // the track still scrubs and the grips still drag.
-        ZoomBarContextMenu(enabled: !aiChat.running) {
+        TimelineBarContextMenu(title: "Remove this zoom", enabled: !aiChat.running) {
             removeZoom(seg.id)
         }
         .frame(width: holdW, height: Self.rowHeight)
@@ -375,8 +444,8 @@ extension EditorView {
             x: fromX, width: bandW,
             icon: "map-pin-simple-area", fallback: "mappin.and.ellipse",
             help: open
-                ? "Viewport pinned from \(shortTimecode(window.from)) to the end of this zoom — scrub ahead and Unpin where the camera should follow again; drag the crop box to move the pinned spot"
-                : "Viewport pinned \(shortTimecode(window.from))–\(shortTimecode(window.until)) — drag the edges to change when; drag the crop box to move the pinned spot"
+                ? "Viewport pinned from \(shortTimecode(window.from)) to the end of this zoom — scrub ahead and Unpin where the camera should follow again; drag the crop box to move the pinned spot; right-click to remove"
+                : "Viewport pinned \(shortTimecode(window.from))–\(shortTimecode(window.until)) — drag the edges to change when; drag the crop box to move the pinned spot; right-click to remove"
         )
 
         ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
@@ -395,6 +464,12 @@ extension EditorView {
                   : "Pin releases here — drag to change when the camera follows the cursor again")
             .zIndex(3)
         }
+
+        TimelineBarContextMenu(title: "Remove this pin", enabled: !aiChat.running) {
+            removePin(window.id, in: seg.id)
+        }
+        .frame(width: bandW, height: Self.rowHeight)
+        .offset(x: fromX)
     }
 
     /// A stretch on the framing row that carries a tooltip and, when wide
@@ -412,6 +487,144 @@ extension EditorView {
             .contentShape(Rectangle())
             .offset(x: x)
             .tooltip(help)
+    }
+
+    // MARK: - Clip row
+
+    func clipTrack(width w: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
+                .fill(Theme.timelineTrack)
+                .frame(width: w, height: Self.rowHeight)
+                .allowsHitTesting(false)
+            ForEach(clipRanges) { clip in
+                clipBar(for: clip, width: w)
+            }
+        }
+        .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
+    }
+
+    /// A clip as a purple bar with its number, and grips on both edges.
+    @ViewBuilder
+    func clipBar(for clip: Clip.Range, width w: CGFloat) -> some View {
+        let fromX = x(of: clip.start, width: w)
+        let barW = max(6, x(of: clip.end, width: w) - fromX)
+        let open = clips.first { $0.id == clip.id }?.end == nil
+        let help = open
+            ? "Clip \(clip.number), open from \(shortTimecode(clip.start)) — scrub ahead and End the clip where it should stop (it runs to \(shortTimecode(clip.end)) meanwhile); right-click to remove"
+            : "Clip \(clip.number): \(shortTimecode(clip.start))–\(shortTimecode(clip.end)) (\(String(format: "%.1fs", clip.length))) — exports as its own file; drag the edges to change when; right-click to remove"
+
+        bar(Theme.clipBar)
+            .frame(width: barW, height: Self.rowHeight)
+            .offset(x: fromX)
+            .allowsHitTesting(false)
+
+        Color.clear
+            .frame(width: barW, height: Self.rowHeight)
+            .overlay {
+                if barW >= Self.minLabelledWidth {
+                    Text("Clip \(clip.number)")
+                        .font(Theme.font(.label12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.primaryForeground)
+                }
+            }
+            .contentShape(Rectangle())
+            .offset(x: fromX)
+            .tooltip(help)
+
+        ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+            let target: TimelineDrag.Target = edge == .leading ? .clipStart(clip.id) : .clipEnd(clip.id)
+            TimelineEdgeHandle(
+                color: Theme.clipBar,
+                dragging: timelineDrag?.target == target,
+                onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                onEnd: { timelineDrag = nil }
+            )
+            .offset(x: (edge == .leading ? fromX : fromX + barW) - TimelineEdgeHandle.width / 2)
+            .tooltip(edge == .leading
+                  ? "Clip start — drag to change where this clip starts"
+                  : "Clip end — drag to change where this clip ends")
+            .zIndex(3)
+        }
+
+        TimelineBarContextMenu(title: "Remove clip \(clip.number)", enabled: !aiChat.running) {
+            removeClip(clip.id)
+        }
+        .frame(width: barW, height: Self.rowHeight)
+        .offset(x: fromX)
+    }
+
+    // MARK: - Speed row
+
+    func speedTrack(width w: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: Self.barCorner, style: .continuous)
+                .fill(Theme.timelineTrack)
+                .frame(width: w, height: Self.rowHeight)
+                .allowsHitTesting(false)
+            ForEach(speedRanges) { window in
+                speedBar(for: window, width: w)
+            }
+        }
+        .frame(width: w, height: Self.rowHeight, alignment: .topLeading)
+    }
+
+    /// A speed-up as a teal bar with its rate, and grips on both edges.
+    @ViewBuilder
+    func speedBar(for window: SpeedWindow.Range, width w: CGFloat) -> some View {
+        let fromX = x(of: window.start, width: w)
+        let barW = max(6, x(of: window.end, width: w) - fromX)
+        let open = speeds.first { $0.id == window.id }?.end == nil
+        let rate = String(format: "%g×", window.rate)
+        let help = open
+            ? "Speeding up \(rate), open from \(shortTimecode(window.start)) — scrub ahead and End the speed-up where the video should run normally again (it runs to \(shortTimecode(window.end)) meanwhile); right-click to set the rate or remove"
+            : "Speed up \(rate): \(shortTimecode(window.start))–\(shortTimecode(window.end)) plays that much faster in every export (\(String(format: "%.1fs", window.length)) becomes \(String(format: "%.1fs", window.length / window.rate))); drag the edges to change when; right-click to set the rate or remove"
+
+        bar(Theme.speedBar)
+            .frame(width: barW, height: Self.rowHeight)
+            .offset(x: fromX)
+            .allowsHitTesting(false)
+
+        Color.clear
+            .frame(width: barW, height: Self.rowHeight)
+            .overlay {
+                if barW >= Self.minLabelledWidth {
+                    Text(rate)
+                        .font(Theme.font(.label12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.primaryForeground)
+                }
+            }
+            .contentShape(Rectangle())
+            .offset(x: fromX)
+            .tooltip(help)
+
+        ForEach([HorizontalEdge.leading, .trailing], id: \.self) { edge in
+            let target: TimelineDrag.Target = edge == .leading ? .speedStart(window.id) : .speedEnd(window.id)
+            TimelineEdgeHandle(
+                color: Theme.speedBar,
+                dragging: timelineDrag?.target == target,
+                onDrag: { dx in dragKeyframe(target, translation: dx, width: w) },
+                onEnd: { timelineDrag = nil }
+            )
+            .offset(x: (edge == .leading ? fromX : fromX + barW) - TimelineEdgeHandle.width / 2)
+            .tooltip(edge == .leading
+                  ? "Speed-up start — drag to change where the fast-forward begins"
+                  : "Speed-up end — drag to change where the video runs normally again")
+            .zIndex(3)
+        }
+
+        TimelineBarContextMenu(
+            items: SpeedWindow.rates.map { r in
+                .init(title: String(format: "Speed up %g×", r), checked: r == window.rate) {
+                    setSpeedRate(r, for: window.id)
+                }
+            } + [.init(title: "Remove this speed-up") { removeSpeed(window.id) }],
+            enabled: !aiChat.running
+        )
+        .frame(width: barW, height: Self.rowHeight)
+        .offset(x: fromX)
     }
 
     // MARK: - Playhead
@@ -444,7 +657,10 @@ extension EditorView {
     /// Move a keyframe by the pointer's travel since its drag began. Zoom
     /// edges keep the minimum hold and stay clear of the neighbouring
     /// zooms; a pin stays inside its hold and clear of the pins either side
-    /// of it. Drags only move keyframes, they never scrub.
+    /// of it; a clip or a speed-up keeps its minimum length and stays clear
+    /// of its neighbours on its row (an open neighbour yields); the trim
+    /// keeps its minimum length inside the video. Drags only move
+    /// keyframes, they never scrub.
     func dragKeyframe(_ target: TimelineDrag.Target, translation dx: CGFloat, width w: CGFloat) {
         guard w > 0 else { return }
         let drag: TimelineDrag
@@ -483,6 +699,41 @@ extension EditorView {
             let until = max(min(t, ceiling), min(ceiling, windows[wi].from + 0.1))
             // At the hold's end the pin is open again: held until released.
             segments[at.seg].pins[at.pin].until = until >= seg.end - 0.001 ? nil : until
+        case .clipStart(let id):
+            guard let i = clips.firstIndex(where: { $0.id == id }),
+                  let range = clipRanges.first(where: { $0.id == id }) else { return }
+            let floor = clips
+                .filter { $0.id != id && $0.start < range.start }
+                .map { $0.end ?? $0.start + Clip.minLength }
+                .max() ?? 0
+            clips[i].start = min(max(t, floor), range.end - Clip.minLength)
+        case .clipEnd(let id):
+            guard let i = clips.firstIndex(where: { $0.id == id }),
+                  let range = clipRanges.first(where: { $0.id == id }) else { return }
+            let ceiling = clips.filter { $0.id != id && $0.start > range.start }.map(\.start).min() ?? duration
+            // Dragging an end always settles it, an open clip included.
+            clips[i].end = max(min(t, ceiling), range.start + Clip.minLength)
+        case .speedStart(let id):
+            guard let i = speeds.firstIndex(where: { $0.id == id }),
+                  let range = speedRanges.first(where: { $0.id == id }) else { return }
+            let floor = speeds
+                .filter { $0.id != id && $0.start < range.start }
+                .map { $0.end ?? $0.start + SpeedWindow.minLength }
+                .max() ?? 0
+            speeds[i].start = min(max(t, floor), range.end - SpeedWindow.minLength)
+        case .speedEnd(let id):
+            guard let i = speeds.firstIndex(where: { $0.id == id }),
+                  let range = speedRanges.first(where: { $0.id == id }) else { return }
+            let ceiling = speeds.filter { $0.id != id && $0.start > range.start }.map(\.start).min() ?? duration
+            // Dragging an end always settles it, an open speed-up included.
+            speeds[i].end = max(min(t, ceiling), range.start + SpeedWindow.minLength)
+        case .trimStart:
+            let start = min(max(t, 0), trimRange.upperBound - Trim.minLength)
+            trim.start = start <= 0.001 ? 0 : start
+        case .trimEnd:
+            let end = max(min(t, duration), trimRange.lowerBound + Trim.minLength)
+            // Back at the video's end means "to the end" — store nothing.
+            trim.end = end >= duration - 0.001 ? nil : end
         }
     }
 
@@ -500,6 +751,18 @@ extension EditorView {
         case .pinEnd(let segID, let pinID):
             guard let seg = segments.first(where: { $0.id == segID }) else { return nil }
             return planner().pinWindow(pinID, in: seg, duration: duration)?.until
+        case .clipStart(let id):
+            return clipRanges.first { $0.id == id }?.start
+        case .clipEnd(let id):
+            return clipRanges.first { $0.id == id }?.end
+        case .speedStart(let id):
+            return speedRanges.first { $0.id == id }?.start
+        case .speedEnd(let id):
+            return speedRanges.first { $0.id == id }?.end
+        case .trimStart:
+            return trimRange.lowerBound
+        case .trimEnd:
+            return trimRange.upperBound
         }
     }
 
@@ -564,27 +827,43 @@ private struct TimelineEdgeHandle: View {
 }
 
 /// Transparent overlay that only claims right-clicks (and Control-clicks)
-/// so a zoom bar can show a context menu without stealing the track's
-/// scrub or the edge grips' drags.
-private struct ZoomBarContextMenu: NSViewRepresentable {
+/// so a zoom, pin, clip or speed bar can show a context menu without
+/// stealing the track's scrub or the edge grips' drags.
+private struct TimelineBarContextMenu: NSViewRepresentable {
+    struct Item {
+        var title: String
+        var checked = false
+        var action: () -> Void
+    }
+
+    var items: [Item]
     var enabled: Bool
-    var onRemove: () -> Void
+
+    /// The common single-entry menu: just "Remove …".
+    init(title: String, enabled: Bool, onRemove: @escaping () -> Void) {
+        self.init(items: [Item(title: title, action: onRemove)], enabled: enabled)
+    }
+
+    init(items: [Item], enabled: Bool) {
+        self.items = items
+        self.enabled = enabled
+    }
 
     func makeNSView(context: Context) -> MenuView {
         let view = MenuView()
+        view.items = items
         view.enabled = enabled
-        view.onRemove = onRemove
         return view
     }
 
     func updateNSView(_ view: MenuView, context: Context) {
+        view.items = items
         view.enabled = enabled
-        view.onRemove = onRemove
     }
 
     final class MenuView: NSView {
+        var items: [Item] = []
         var enabled = true
-        var onRemove: (() -> Void)?
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             guard enabled, bounds.contains(point), isContextClick else { return nil }
@@ -615,18 +894,19 @@ private struct ZoomBarContextMenu: NSViewRepresentable {
             guard enabled else { return }
             let menu = NSMenu()
             menu.autoenablesItems = false
-            let item = NSMenuItem(
-                title: "Remove this zoom",
-                action: #selector(remove),
-                keyEquivalent: ""
-            )
-            item.target = self
-            menu.addItem(item)
+            for (i, entry) in items.enumerated() {
+                let item = NSMenuItem(title: entry.title, action: #selector(pick(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = i
+                item.state = entry.checked ? .on : .off
+                menu.addItem(item)
+            }
             menu.popUp(positioning: nil, at: point, in: self)
         }
 
-        @objc private func remove() {
-            onRemove?()
+        @objc private func pick(_ sender: NSMenuItem) {
+            guard items.indices.contains(sender.tag) else { return }
+            items[sender.tag].action()
         }
     }
 }

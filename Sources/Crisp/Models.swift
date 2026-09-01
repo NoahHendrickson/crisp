@@ -221,17 +221,205 @@ enum CursorStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Edited zoom plan, saved as plan.json next to the master. When present, the
-/// exporter uses it instead of auto-generating from the click log.
+/// The stretch of the recording the whole-video export keeps: seconds on
+/// the master timeline, `end` nil meaning the end of the video. Footage
+/// outside it is left out of that export (the clips are unaffected — they
+/// name their own stretches).
+struct Trim: Codable, Equatable {
+    var start: Double = 0
+    var end: Double? = nil
+
+    /// The shortest stretch a trim may keep.
+    static let minLength = 0.5
+
+    /// Nothing trimmed.
+    var isDefault: Bool { start <= 0 && end == nil }
+
+    /// `start...end` resolved against the video's length.
+    func range(duration: Double) -> ClosedRange<Double> {
+        let from = min(max(start, 0), duration)
+        let to = min(end ?? duration, duration)
+        return from...max(from, to)
+    }
+}
+
+/// A stretch of the recording that "Export clips" writes as a file of its
+/// own: seconds on the master timeline. `end` nil is an open clip — it runs
+/// to the next clip's start (or the end of the video) until the user ends
+/// it. Clips are exported one by one; the whole-video export is untouched.
+struct Clip: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var start: Double
+    var end: Double? = nil
+
+    /// The shortest clip.
+    static let minLength = 0.5
+
+    /// One clip as it exports: `start...end` resolved, numbered in time
+    /// order ("clip 1", "clip 2", …).
+    struct Range: Identifiable, Equatable {
+        var id: UUID
+        var number: Int
+        var start: Double
+        var end: Double
+        var length: Double { end - start }
+    }
+
+    /// The clips in time order with every open end resolved to the next
+    /// clip's start or the end of the video, cut short so they never
+    /// overlap; a clip that resolves to nothing is skipped.
+    static func ranges(of clips: [Clip], duration: Double) -> [Range] {
+        let sorted = clips.sorted { $0.start < $1.start }
+        var out: [Range] = []
+        for (i, clip) in sorted.enumerated() {
+            let start = min(max(clip.start, 0), duration)
+            var end = min(clip.end ?? duration, duration)
+            if i + 1 < sorted.count { end = min(end, sorted[i + 1].start) }
+            guard end > start + 1e-6 else { continue }
+            out.append(Range(id: clip.id, number: out.count + 1, start: start, end: end))
+        }
+        return out
+    }
+}
+
+/// A stretch of the recording that exports fast-forwarded: seconds on the
+/// master timeline, played `rate`× faster in every export (and approximated
+/// in the preview). `end` nil is an open speed-up — it runs to the next
+/// one's start (or the end of the video) until the user ends it.
+struct SpeedWindow: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var start: Double
+    var end: Double? = nil
+    /// Fast-forward factor (> 1); slow motion may extend this later.
+    var rate: Double = SpeedWindow.defaultRate
+
+    /// The shortest speed-up.
+    static let minLength = 0.5
+    static let defaultRate = 2.0
+    /// The rates the menus offer.
+    static let rates: [Double] = [2, 3, 4, 8]
+
+    /// One speed-up as it applies: `start...end` resolved.
+    struct Range: Identifiable, Equatable {
+        var id: UUID
+        var start: Double
+        var end: Double
+        var rate: Double
+        var length: Double { end - start }
+    }
+
+    /// The speed-ups in time order with every open end resolved to the next
+    /// one's start or the end of the video, cut short so they never overlap;
+    /// one that resolves to nothing is skipped.
+    static func ranges(of windows: [SpeedWindow], duration: Double) -> [Range] {
+        let sorted = windows.sorted { $0.start < $1.start }
+        var out: [Range] = []
+        for (i, window) in sorted.enumerated() {
+            let start = min(max(window.start, 0), duration)
+            var end = min(window.end ?? duration, duration)
+            if i + 1 < sorted.count { end = min(end, sorted[i + 1].start) }
+            guard end > start + 1e-6 else { continue }
+            out.append(Range(id: window.id, start: start, end: end, rate: max(1, window.rate)))
+        }
+        return out
+    }
+
+    /// How long a stretch of the master runs once the speed-ups inside it
+    /// are applied: each sped stretch contributes `length / rate`.
+    static func outputLength(of window: ClosedRange<Double>, ranges: [Range]) -> Double {
+        var length = window.upperBound - window.lowerBound
+        for range in ranges {
+            let overlap = min(range.end, window.upperBound) - max(range.start, window.lowerBound)
+            if overlap > 0 { length -= overlap * (1 - 1 / range.rate) }
+        }
+        return length
+    }
+
+    /// The master time on show `t` seconds into the sped-up rendering of
+    /// `window` — piecewise linear: one output second covers `rate` master
+    /// seconds inside a speed-up, one outside. `ranges` must be in time
+    /// order and non-overlapping (see `ranges(of:duration:)`).
+    static func sourceTime(atOutput t: Double, in window: ClosedRange<Double>, ranges: [Range]) -> Double {
+        var remaining = t
+        var source = window.lowerBound
+        for range in ranges where range.end > window.lowerBound && range.start < window.upperBound {
+            let start = max(range.start, window.lowerBound)
+            let end = min(range.end, window.upperBound)
+            let plain = start - source
+            if remaining <= plain { return source + remaining }
+            remaining -= plain
+            let sped = (end - start) / range.rate
+            if remaining <= sped { return start + remaining * range.rate }
+            remaining -= sped
+            source = end
+        }
+        return min(source + remaining, window.upperBound)
+    }
+}
+
+/// Edited plan, saved as plan.json next to the master: the zooms, the
+/// cursor style, the trim, the clips and the speed-ups. When present, the
+/// exporter uses it instead of auto-generating from the click log. Older
+/// plans carry only the zooms; the other keys are omitted when they are at
+/// their defaults, so such a plan round-trips unchanged.
 struct ZoomPlan: Codable {
     var version: Int = 1
     var segments: [ZoomSegment]
-    /// nil = classic. Omitted from JSON so older plans round-trip unchanged.
-    var cursorStyle: CursorStyle? = nil
+    var cursorStyle: CursorStyle = .classic
+    var trim = Trim()
+    var clips: [Clip] = []
+    var speeds: [SpeedWindow] = []
+    /// Draw the rate ("3×") in the video's bottom-right corner while a
+    /// speed-up plays, in the preview and every export.
+    var speedBadge = false
+
+    init(
+        segments: [ZoomSegment], cursorStyle: CursorStyle = .classic, trim: Trim = Trim(),
+        clips: [Clip] = [], speeds: [SpeedWindow] = [], speedBadge: Bool = false
+    ) {
+        self.segments = segments
+        self.cursorStyle = cursorStyle
+        self.trim = trim
+        self.clips = clips
+        self.speeds = speeds
+        self.speedBadge = speedBadge
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, segments, cursorStyle, trim, clips, speeds, speedBadge
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        segments = try container.decode([ZoomSegment].self, forKey: .segments)
+        cursorStyle = try container.decodeIfPresent(CursorStyle.self, forKey: .cursorStyle) ?? .classic
+        trim = try container.decodeIfPresent(Trim.self, forKey: .trim) ?? Trim()
+        clips = try container.decodeIfPresent([Clip].self, forKey: .clips) ?? []
+        speeds = try container.decodeIfPresent([SpeedWindow].self, forKey: .speeds) ?? []
+        speedBadge = try container.decodeIfPresent(Bool.self, forKey: .speedBadge) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(segments, forKey: .segments)
+        if cursorStyle != .classic { try container.encode(cursorStyle, forKey: .cursorStyle) }
+        if !trim.isDefault { try container.encode(trim, forKey: .trim) }
+        if !clips.isEmpty { try container.encode(clips, forKey: .clips) }
+        if !speeds.isEmpty { try container.encode(speeds, forKey: .speeds) }
+        if speedBadge { try container.encode(speedBadge, forKey: .speedBadge) }
+    }
+
+    /// The clips as they export (see `Clip.ranges`).
+    func clipRanges(duration: Double) -> [Clip.Range] {
+        Clip.ranges(of: clips, duration: duration)
+    }
 }
 
 /// A recording on disk: a folder containing master.mov + events.json
-/// (+ export.mov / export 2.mp4 / … after exports).
+/// (+ export.mov / export 2.mp4 / clip 1.mov / … after exports, each with
+/// a .plan.json snapshot beside it).
 struct Recording: Identifiable, Equatable {
     var id: URL { folder }
     var folder: URL
@@ -253,16 +441,15 @@ struct Recording: Identifiable, Equatable {
         loadPlan()?.segments
     }
 
-    func savePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle) {
-        try? Self.writePlan(segments, cursorStyle: cursorStyle, to: planURL)
+    func savePlan(_ plan: ZoomPlan) {
+        try? Self.writePlan(plan, to: planURL)
     }
 
     /// Throwing form for callers that must know the plan reached disk
     /// (the export snapshot gates "export succeeded" on it).
-    static func writePlan(_ segments: [ZoomSegment], cursorStyle: CursorStyle, to url: URL) throws {
+    static func writePlan(_ plan: ZoomPlan, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let plan = ZoomPlan(segments: segments, cursorStyle: cursorStyle == .classic ? nil : cursorStyle)
         try encoder.encode(plan).write(to: url, options: .atomic)
     }
 
@@ -276,7 +463,8 @@ struct Recording: Identifiable, Equatable {
 
     var name: String { folder.lastPathComponent }
 
-    /// Existing exports, oldest first ("export.mov", "export 2.mp4", …).
+    /// Existing whole-video exports, oldest first ("export.mov",
+    /// "export 2.mp4", …).
     var exportURLs: [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         return names
@@ -291,6 +479,22 @@ struct Recording: Identifiable, Equatable {
             .map { folder.appendingPathComponent($0.1) }
     }
 
+    /// Existing clip exports, by clip number then by run ("clip 1.mov",
+    /// "clip 1 (2).mov", "clip 2.mov", …).
+    var clipExportURLs: [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names
+            .compactMap { name -> (Int, Int, String)? in
+                let url = URL(fileURLWithPath: name)
+                guard ExportFormat.fileExtensions.contains(url.pathExtension.lowercased()),
+                      let key = Self.clipExportKey(of: url.deletingPathExtension().lastPathComponent)
+                else { return nil }
+                return (key.number, key.run, name)
+            }
+            .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
+            .map { folder.appendingPathComponent($0.2) }
+    }
+
     /// What the library sidebar shows under a recording's name: the container
     /// and size of the newest file (latest export, else the master), plus the
     /// zoom and step counts of the current plan.json.
@@ -302,6 +506,7 @@ struct Recording: Identifiable, Equatable {
         var fileSize: Int64?
         var zoomCount: Int
         var stepCount: Int
+        /// A whole-video or clip export exists.
         var hasExport: Bool
     }
 
@@ -315,7 +520,7 @@ struct Recording: Identifiable, Equatable {
             fileSize: size,
             zoomCount: segments.count,
             stepCount: segments.reduce(0) { $0 + $1.steps.count },
-            hasExport: !exports.isEmpty
+            hasExport: !exports.isEmpty || !clipExportURLs.isEmpty
         )
     }
 
@@ -332,6 +537,20 @@ struct Recording: Identifiable, Equatable {
         return folder.appendingPathComponent(stem).appendingPathExtension(format.fileExtension)
     }
 
+    /// Next unused filename for clip `number`: "clip 1.<ext>", then
+    /// "clip 1 (2).<ext>", "clip 1 (3).<ext>", … — a re-export never
+    /// overwrites an earlier run, whatever container it used.
+    func nextClipExportURL(number: Int, for format: ExportFormat) -> URL {
+        let used = Set(clipExportURLs.compactMap { url -> Int? in
+            let key = Self.clipExportKey(of: url.deletingPathExtension().lastPathComponent)
+            return key?.number == number ? key?.run : nil
+        })
+        var run = 1
+        while used.contains(run) { run += 1 }
+        let stem = run == 1 ? "clip \(number)" : "clip \(number) (\(run))"
+        return folder.appendingPathComponent(stem).appendingPathExtension(format.fileExtension)
+    }
+
     /// "export" → 1, "export 2" → 2, anything else → nil.
     private static func exportIndex(of stem: String) -> Int? {
         if stem == "export" { return 1 }
@@ -339,6 +558,19 @@ struct Recording: Identifiable, Equatable {
             return nil
         }
         return n
+    }
+
+    /// "clip 3" → (3, 1), "clip 3 (2)" → (3, 2), anything else → nil.
+    private static func clipExportKey(of stem: String) -> (number: Int, run: Int)? {
+        guard stem.hasPrefix("clip ") else { return nil }
+        let rest = stem.dropFirst("clip ".count)
+        let parts = rest.split(separator: " ", maxSplits: 1)
+        guard let first = parts.first, let number = Int(first), number >= 1 else { return nil }
+        if parts.count == 1 { return (number, 1) }
+        let tail = parts[1]
+        guard tail.hasPrefix("("), tail.hasSuffix(")"),
+              let run = Int(tail.dropFirst().dropLast()), run >= 2 else { return nil }
+        return (number, run)
     }
 
     static func library() -> URL {

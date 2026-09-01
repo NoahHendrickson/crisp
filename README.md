@@ -23,10 +23,19 @@ Meanwhile a global mouse monitor logs clicks and samples the cursor position at
 `events.json` beside the master.
 
 **Zoom editor** — opening a recording shows a preview with the zooms applied
-live and a three-row timeline (video, zooms, framing). The camera follows the
-cursor on its own; you set the zoom level and timing (drag a zoom's edges),
-and can pin the viewport for part of a zoom when the action isn't under the
-mouse. The ⋮ menu picks the cursor drawn on the video — the classic macOS
+live and a five-row timeline (video, zooms, framing, clips, speed-ups). The camera
+follows the cursor on its own; you set the zoom level and timing (the Zoom
+control's plus starts a zoom at the playhead — scrub ahead and end it — and
+dragging a zoom's edges adjusts it), and can pin
+the viewport for part of a zoom when the action isn't under the mouse. Drag the grips at the ends of the video row (or ⋮ →
+Trim the start/end to here) to trim what the whole-video export keeps.
+Clips mark stretches to export as files of their own: Start clip at the
+playhead, scrub ahead, End clip; drag a clip's edges on the timeline to
+adjust it. Speed-ups fast-forward a stretch in every export (the same
+cycle: Speed up at the playhead, scrub ahead, End speed-up); the control's
+rate button drops down 2×–8× (right-clicking the teal bar works too) plus a
+toggle that badges the rate in the video's bottom-right corner while it's
+sped up, and the preview plays the stretch faster to match. The ⋮ menu picks the cursor drawn on the video — the classic macOS
 pointer, or a chunkier glossy one — per recording. The **AI editor** hands the
 plan, the click log and annotated stills to Claude Code or Codex for an
 editorial pass, with a before/after Compare. Edits autosave to `plan.json`
@@ -37,7 +46,12 @@ beside the master.
 cursor follower, and renders offline: the master is decoded at 10 bits, the
 camera crop/scale is applied in Core Image (16-bit float working space), a
 vector-drawn cursor and click ripples are composited on top, and the result is
-written as high-bitrate 10-bit HEVC (`export.mov`).
+written as high-bitrate 10-bit HEVC (`export.mov`, numbered after the first),
+trimmed if the recording is, with any speed-ups fast-forwarding their
+stretches. Once a recording has clips, Export also offers
+them — all at once or one at a time: each renders to its own `clip N.mov`,
+re-timed to start at zero, with the same zooms; the master and whole-video
+exports are untouched.
 
 The renderer runs on a fixed 60fps output clock, holding the last source frame
 while the camera animates — necessary because ScreenCaptureKit only emits
@@ -111,6 +125,8 @@ output folder for inspection.
 - ~~Editable zoom timeline~~ — done: per-recording zoom editor (live preview via
   shared FrameComposer + AVVideoCompositing, draggable zoom and pin edges,
   crop box on the preview, plan saved to plan.json)
+- ~~Trim and clips~~ — done: trim the whole-video export, mark clips and
+  export each as its own file
 - ~~Cursor-follow camera mode~~ — done: the follower frames every zoom
 - ~~AI editorial pass~~ — done: the AI editor (Claude Code / Codex) with Compare
 - Track window movement during window capture (clicks currently map against

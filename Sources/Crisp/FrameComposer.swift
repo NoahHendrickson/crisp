@@ -1,9 +1,11 @@
 import Foundation
 import CoreImage
 import CoreGraphics
+import CoreText
 
 /// Turns a decoded master frame + timestamp into the final composed frame:
-/// zoom camera transform, re-drawn vector cursor, click ripples.
+/// zoom camera transform, re-drawn vector cursor, click ripples, and the
+/// optional speed-up badge.
 /// Shared by the offline exporter and the live editor preview, so the preview
 /// is pixel-identical to what exports.
 final class FrameComposer: FrameComposing {
@@ -14,8 +16,15 @@ final class FrameComposer: FrameComposing {
     private let clicks: [MouseEvent]
     private let cursor: CursorSprite
     private let rippleScale: Double
+    /// While `t` is inside one of these, its rate is drawn in the
+    /// bottom-right corner (plan.speedBadge; empty when the badge is off).
+    private let speedBadges: [SpeedWindow.Range]
+    private let badge: SpeedBadgeSprite
 
-    init(meta: RecordingMeta, keys: [ZoomPlanner.Keyframe], cursorStyle: CursorStyle) {
+    init(
+        meta: RecordingMeta, keys: [ZoomPlanner.Keyframe], cursorStyle: CursorStyle,
+        speedBadges: [SpeedWindow.Range] = []
+    ) {
         self.width = Double(meta.pixelWidth)
         self.height = Double(meta.pixelHeight)
         self.keys = keys
@@ -23,6 +32,8 @@ final class FrameComposer: FrameComposing {
         self.clicks = meta.events.filter { $0.kind == .leftDown }
         self.cursor = CursorSprite(style: cursorStyle, scaleFactor: meta.scaleFactor)
         self.rippleScale = meta.scaleFactor
+        self.speedBadges = speedBadges
+        self.badge = SpeedBadgeSprite(frameHeight: Double(meta.pixelHeight))
     }
 
     /// Which cursor kinds `style` has a sprite for (self-test).
@@ -62,7 +73,27 @@ final class FrameComposer: FrameComposing {
             }
         }
 
-        return composed.cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+        var out = composed.cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // The badge is screen-space: composited after the camera, so it holds
+        // its size and corner through zooms. A short fade at the window's
+        // edges keeps it from popping.
+        if let range = speedBadges.first(where: { t >= $0.start && t < $0.end }),
+           let sprite = badge.image(rate: range.rate) {
+            let alpha = min(1, max(0, min(t - range.start, range.end - t) / 0.2))
+            out = sprite
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)),
+                ])
+                .transformed(by: CGAffineTransform(
+                    translationX: width - sprite.extent.width - badge.margin,
+                    y: badge.margin
+                ))
+                .composited(over: out)
+                .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+
+        return out
     }
 
     /// Interpolated cursor position (master pixels, top-left origin) at time t.
@@ -83,6 +114,61 @@ final class FrameComposer: FrameComposing {
         let span = b.t - a.t
         let u = span > 0 ? (t - a.t) / span : 1
         return (a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, a.kind ?? .arrow)
+    }
+}
+
+/// The speed-up badge: a dark capsule with the rate ("3×") in white, sized
+/// against the frame so it reads the same at any recording resolution. One
+/// raster per rate, built on first use.
+private final class SpeedBadgeSprite {
+    private var cache: [Double: CIImage] = [:]
+    /// Badge height in master pixels.
+    private let height: Double
+    /// Gap between the badge and the frame's bottom-right corner.
+    let margin: Double
+
+    init(frameHeight: Double) {
+        height = max(22, (frameHeight * 0.045).rounded())
+        margin = (height * 0.55).rounded()
+    }
+
+    func image(rate: Double) -> CIImage? {
+        if let cached = cache[rate] { return cached }
+        guard let built = build(rate: rate) else { return nil }
+        cache[rate] = built
+        return built
+    }
+
+    private func build(rate: Double) -> CIImage? {
+        let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, height * 0.52, nil)
+        let attributed = CFAttributedStringCreate(
+            nil, String(format: "%g×", rate) as CFString,
+            [
+                kCTFontAttributeName: font,
+                kCTForegroundColorAttributeName: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
+            ] as CFDictionary
+        )
+        guard let attributed else { return nil }
+        let line = CTLineCreateWithAttributedString(attributed)
+        let text = CTLineGetBoundsWithOptions(line, [.useOpticalBounds])
+        let width = (text.width + height * 0.84).rounded()
+        guard let ctx = CGContext(
+            data: nil, width: Int(width), height: Int(height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        let box = CGRect(x: 0, y: 0, width: width, height: height)
+        ctx.addPath(CGPath(roundedRect: box, cornerWidth: height / 2, cornerHeight: height / 2, transform: nil))
+        ctx.setFillColor(CGColor(gray: 0, alpha: 0.55))
+        ctx.fillPath()
+        ctx.textPosition = CGPoint(
+            x: (width - text.width) / 2 - text.minX,
+            y: (height - text.height) / 2 - text.minY
+        )
+        CTLineDraw(line, ctx)
+        guard let cg = ctx.makeImage() else { return nil }
+        return CIImage(cgImage: cg)
     }
 }
 
