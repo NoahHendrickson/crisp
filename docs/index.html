@@ -127,34 +127,25 @@
       counter-reset: step;
       padding: 0;
       margin: 0;
-      display: grid;
-      gap: 12px;
+      border-top: 1px solid var(--border);
     }
     ol.steps li {
       counter-increment: step;
-      background: var(--well);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 16px 18px 16px 56px;
       position: relative;
+      padding: 18px 0 18px 40px;
+      border-bottom: 1px solid var(--border);
     }
     ol.steps li::before {
       content: counter(step);
       position: absolute;
-      left: 18px;
-      top: 16px;
-      width: 26px;
-      height: 26px;
-      border-radius: 50%;
-      background: var(--foreground);
-      color: var(--background);
+      left: 0;
+      top: 18px;
+      color: var(--muted-foreground);
       font-size: 14px;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      font-variant-numeric: tabular-nums;
+      line-height: 24px;
     }
-    ol.steps strong { font-weight: 600; display: block; margin-bottom: 2px; }
+    ol.steps strong { font-weight: 500; display: block; margin-bottom: 4px; }
     ol.steps p { margin: 0; color: var(--text-secondary); font-size: 15px; }
     details { margin-top: 8px; font-size: 14px; color: var(--text-secondary); }
     summary { cursor: pointer; color: var(--muted-foreground); }
