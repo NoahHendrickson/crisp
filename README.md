@@ -71,10 +71,16 @@ from display/region shots.
 
 ## Installing
 
-Grab `Crisp-<version>.zip` from [Releases](../../releases), unzip, and drop
-`Crisp.app` in `/Applications`. The app is signed with a local certificate,
-not notarized by Apple — on first launch, right-click → Open (or run
-`xattr -dr com.apple.quarantine /Applications/Crisp.app`).
+**[Download the latest version →](https://noahhendrickson.github.io/crisp/)**
+(macOS 14+, Apple silicon). The download page lives in `docs/` and is served
+by GitHub Pages; it reads the latest release from the GitHub API, so cutting
+a release updates it automatically.
+
+Or grab `Crisp-<version>.zip` from [Releases](../../releases) directly,
+unzip, and drop `Crisp.app` in `/Applications`. The app is signed with a
+local certificate, not notarized by Apple — on first launch, right-click →
+Open (on macOS 15+, then System Settings → Privacy & Security → Open Anyway),
+or run `xattr -dr com.apple.quarantine /Applications/Crisp.app`.
 
 ## Building & running
 
