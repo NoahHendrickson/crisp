@@ -34,8 +34,8 @@ playhead, scrub ahead, End clip; drag a clip's edges on the timeline to
 adjust it. Speed-ups fast-forward a stretch in every export (the same
 cycle: Speed up at the playhead, scrub ahead, End speed-up); the control's
 rate button drops down 2×–8× (right-clicking the teal bar works too) plus a
-toggle that badges the rate in the video's bottom-right corner while it's
-sped up, and the preview plays the stretch faster to match. The ⋮ menu picks the cursor drawn on the video — the classic macOS
+per-speed-up toggle that badges its rate in the video's bottom-right corner
+while it plays, and the preview plays the stretch faster to match. The ⋮ menu picks the cursor drawn on the video — the classic macOS
 pointer, or a chunkier glossy one — per recording. The **AI editor** hands the
 plan, the click log and annotated stills to Claude Code or Codex for an
 editorial pass, with a before/after Compare. Edits autosave to `plan.json`
@@ -46,10 +46,10 @@ beside the master.
 cursor follower, and renders offline: the master is decoded at 10 bits, the
 camera crop/scale is applied in Core Image (16-bit float working space), a
 vector-drawn cursor and click ripples are composited on top, and the result is
-written as high-bitrate 10-bit HEVC (`export.mov`, numbered after the first),
+written as high-bitrate 10-bit HEVC (`<name>.mov`, numbered after the first),
 trimmed if the recording is, with any speed-ups fast-forwarding their
 stretches. Once a recording has clips, Export also offers
-them — all at once or one at a time: each renders to its own `clip N.mov`,
+them — all at once or one at a time: each renders to its own `<name> clip N.mov`,
 re-timed to start at zero, with the same zooms; the master and whole-video
 exports are untouched.
 
@@ -57,7 +57,10 @@ The renderer runs on a fixed 60fps output clock, holding the last source frame
 while the camera animates — necessary because ScreenCaptureKit only emits
 frames when screen content changes.
 
-Recordings live in `~/Movies/Crisp/<timestamp>/`.
+Recordings live in `~/Movies/Crisp/<name>/`, named by timestamp until you
+rename them in the sidebar; renaming moves the folder and every export inside
+it, so the files always carry the recording's current name (the raw
+`master.mov` keeps its fixed name).
 
 **Screenshots** — the Screenshot button captures the currently selected
 source (display/window/region) at 10 bits in Display P3 and saves a

@@ -76,7 +76,7 @@ enum SelfTest {
         let exportURL = try await renderer.export(recording: recording) { fraction in
             print(String(format: "selftest: export %3.0f%%", fraction * 100))
         }
-        guard exportURL.lastPathComponent == "export.mov" else {
+        guard exportURL.lastPathComponent == "\(recording.name).mov" else {
             throw SelfTestError.badExportName(exportURL.lastPathComponent)
         }
 
@@ -103,7 +103,7 @@ enum SelfTest {
         // Re-exporting (as MP4/H.264) must not overwrite the first export: it
         // should land in a numbered sibling file.
         let planURL = try await Renderer().export(recording: recording, format: .mp4H264) { _ in }
-        guard planURL.lastPathComponent == "export 2.mp4",
+        guard planURL.lastPathComponent == "\(recording.name) 2.mp4",
               FileManager.default.fileExists(atPath: exportURL.path),
               recording.exportURLs == [exportURL, planURL] else {
             throw SelfTestError.badExportName(planURL.lastPathComponent)
@@ -126,7 +126,7 @@ enum SelfTest {
         }
         print("selftest: edited-plan export ok — \(planURL.lastPathComponent), \(String(format: "%.2f", planDuration))s")
         let hevcURL = try await Renderer().export(recording: recording, format: .mp4HEVC) { _ in }
-        guard hevcURL.lastPathComponent == "export 3.mp4",
+        guard hevcURL.lastPathComponent == "\(recording.name) 3.mp4",
               let hevcTrack = try await AVURLAsset(url: hevcURL).loadTracks(withMediaType: .video).first,
               let hevcDesc = try await hevcTrack.load(.formatDescriptions).first,
               CMFormatDescriptionGetMediaSubType(hevcDesc) == kCMVideoCodecType_HEVC else {
@@ -139,6 +139,9 @@ enum SelfTest {
 
         try await checkSpeeds(recording: recording, duration: duration)
         print("selftest: speed-up mapping + export ok")
+
+        try checkRename(recording: recording)
+        print("selftest: rename moves exports + legacy names ok")
 
         try checkCompare(meta: meta, width: width, height: height, duration: duration)
 
@@ -458,8 +461,8 @@ enum SelfTest {
     }
 
     /// Plans without a cursor style, trim, clips or speed-ups decode to the
-    /// defaults and encode without those keys; every style draws all three
-    /// cursor kinds.
+    /// defaults and encode without those keys; classic draws all three cursor
+    /// kinds while the cute style draws only its arrow.
     private static func checkCursorStyle() throws {
         let legacy = try JSONDecoder().decode(ZoomPlan.self, from: Data(#"{"version":1,"segments":[]}"#.utf8))
         guard legacy.cursorStyle == .classic, legacy.trim.isDefault, legacy.clips.isEmpty,
@@ -485,9 +488,10 @@ enum SelfTest {
             throw SelfTestError.cursor("cursor style, trim, clips or speeds did not round-trip")
         }
         for style in CursorStyle.allCases {
+            let expected: Set<CursorKind> = style == .classic ? [.arrow, .pointer, .iBeam] : [.arrow]
             let kinds = FrameComposer.cursorKinds(drawnBy: style)
-            guard kinds == Set([.arrow, .pointer, .iBeam]) else {
-                throw SelfTestError.cursor("\(style) draws \(kinds), not every cursor kind")
+            guard kinds == expected else {
+                throw SelfTestError.cursor("\(style) draws \(kinds), expected \(expected)")
             }
         }
     }
@@ -721,7 +725,7 @@ enum SelfTest {
         recording.savePlan(ZoomPlan(segments: segments, cursorStyle: .bubbly, trim: trim, clips: clips))
         let wholeBefore = recording.exportURLs
         let whole = try await Renderer().export(recording: recording) { _ in }
-        guard whole.lastPathComponent == "export 4.mov" else { throw fail("whole export named \(whole.lastPathComponent)") }
+        guard whole.lastPathComponent == "\(recording.name) 4.mov" else { throw fail("whole export named \(whole.lastPathComponent)") }
         let wholeDuration = try await AVURLAsset(url: whole).load(.duration).seconds
         guard abs(wholeDuration - 1.2) < 0.25 else { throw fail("trimmed export runs \(wholeDuration)s, not 1.2s") }
 
@@ -738,11 +742,11 @@ enum SelfTest {
             let size = try await track.load(.naturalSize)
             guard Int(size.width) == width, Int(size.height) == height else { throw fail("\(url.lastPathComponent) is \(size)") }
         }
-        guard clipURLs.map(\.lastPathComponent) == ["clip 1.mov", "clip 2.mov"] else {
+        guard clipURLs.map(\.lastPathComponent) == ["\(recording.name) clip 1.mov", "\(recording.name) clip 2.mov"] else {
             throw fail("clips named \(clipURLs.map(\.lastPathComponent))")
         }
         let again = try await Renderer().export(recording: recording, format: .mp4H264, clip: ranges[0]) { _ in }
-        guard again.lastPathComponent == "clip 1 (2).mp4",
+        guard again.lastPathComponent == "\(recording.name) clip 1 (2).mp4",
               recording.clipExportURLs == [clipURLs[0], again, clipURLs[1]],
               recording.exportURLs == wholeBefore + [whole] else {
             throw fail("clip re-export named \(again.lastPathComponent); clips \(recording.clipExportURLs.map(\.lastPathComponent)), exports \(recording.exportURLs.map(\.lastPathComponent))")
@@ -762,6 +766,64 @@ enum SelfTest {
     /// next one or the video's end, the output timeline compressed piecewise
     /// (one output second covers `rate` master seconds inside a window), and
     /// the whole-video export correspondingly shorter.
+    /// Renaming moves the folder and every export inside it under the new
+    /// name — plan snapshots too — and files still under the old fixed
+    /// stems ("export 2", "clip 3") come along. Ends with the recording back
+    /// where it was, its files as they were.
+    private static func checkRename(recording: Recording) throws {
+        func fail(_ what: String) -> SelfTestError { .rename(what) }
+        let fm = FileManager.default
+        let before = (recording.exportURLs + recording.clipExportURLs).map(\.lastPathComponent)
+        guard before.count == 8 else { throw fail("expected 8 exports before renaming, found \(before)") }
+
+        // Files from before exports carried the recording's name.
+        let legacy = ["export 9.mov", "clip 3.mov", "clip 3 (2).mp4", "clip 3 (2).plan.json"]
+        for name in legacy {
+            try Data().write(to: recording.folder.appendingPathComponent(name))
+        }
+        guard recording.exportURLs.last?.lastPathComponent == "export 9.mov",
+              recording.clipExportURLs.suffix(2).map(\.lastPathComponent) == ["clip 3.mov", "clip 3 (2).mp4"] else {
+            throw fail("legacy export names not recognised: \(recording.exportURLs.map(\.lastPathComponent)) \(recording.clipExportURLs.map(\.lastPathComponent))")
+        }
+        guard recording.nextExportURL(for: .movHEVC).lastPathComponent == "\(recording.name) 6.mov" else {
+            throw fail("next export index not shared with legacy files: \(recording.nextExportURL(for: .movHEVC).lastPathComponent)")
+        }
+
+        let newName = "renamed \(recording.name)"
+        let moved = try recording.renamed(to: newName)
+        defer { _ = try? moved.renamed(to: recording.name) }
+        guard moved.name == newName, fm.fileExists(atPath: moved.masterURL.path),
+              !fm.fileExists(atPath: recording.folder.path) else {
+            throw fail("folder not moved to \(moved.folder.path)")
+        }
+        let wholeNames = moved.exportURLs.map(\.lastPathComponent)
+        let clipNames = moved.clipExportURLs.map(\.lastPathComponent)
+        let wantWhole = ["\(newName).mov", "\(newName) 2.mp4", "\(newName) 3.mp4", "\(newName) 4.mov", "\(newName) 5.mov", "\(newName) 9.mov"]
+        let wantClips = ["\(newName) clip 1.mov", "\(newName) clip 1 (2).mp4", "\(newName) clip 2.mov", "\(newName) clip 3.mov", "\(newName) clip 3 (2).mp4"]
+        guard wholeNames == wantWhole, clipNames == wantClips else {
+            throw fail("after rename: exports \(wholeNames), clips \(clipNames)")
+        }
+        // Snapshots follow their exports; nothing is left under the old stems.
+        let contents = Set((try? fm.contentsOfDirectory(atPath: moved.folder.path)) ?? [])
+        guard contents.contains("\(newName) 2.plan.json"), contents.contains("\(newName) clip 3 (2).plan.json"),
+              !contents.contains(where: { $0.hasPrefix(recording.name) || $0.hasPrefix("export") || $0.hasPrefix("clip ") }) else {
+            throw fail("stale names after rename: \(contents.sorted())")
+        }
+        guard moved.nextExportURL(for: .mp4H264).lastPathComponent == "\(newName) 6.mp4",
+              moved.nextClipExportURL(number: 3, for: .movHEVC).lastPathComponent == "\(newName) clip 3 (3).mov" else {
+            throw fail("numbering lost after rename")
+        }
+
+        // Back to the original name, then drop the fabricated files.
+        let back = try moved.renamed(to: recording.name)
+        guard back.folder == recording.folder else { throw fail("rename back landed at \(back.folder.path)") }
+        for name in ["\(recording.name) 9.mov", "\(recording.name) clip 3.mov", "\(recording.name) clip 3 (2).mp4", "\(recording.name) clip 3 (2).plan.json"] {
+            try fm.removeItem(at: recording.folder.appendingPathComponent(name))
+        }
+        let after = (recording.exportURLs + recording.clipExportURLs).map(\.lastPathComponent)
+        guard after == before else { throw fail("round trip changed the exports: \(after)") }
+    }
+
     private static func checkSpeeds(recording: Recording, duration: Double) async throws {
         func fail(_ what: String) -> SelfTestError { .speeds(what) }
 
@@ -791,21 +853,39 @@ enum SelfTest {
             throw fail("a window clipped by the export stretch maps wrong")
         }
 
-        // The badge flag: omitted from JSON at its default, round-trips, and
-        // actually draws — with it, the bottom-right corner differs from the
-        // badge-less composer inside a window and matches it outside.
-        let defaultPlan = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ZoomPlan(segments: []))) as? [String: Any]
-        guard defaultPlan?["speedBadge"] == nil else { throw fail("default plan encoded speedBadge") }
-        guard try JSONDecoder().decode(
-            ZoomPlan.self, from: JSONEncoder().encode(ZoomPlan(segments: [], speedBadge: true))
-        ).speedBadge else { throw fail("speedBadge did not round-trip") }
+        // The badge flag is per speed-up: omitted from JSON at its default,
+        // round-trips, a plan-wide `speedBadge` from older plans folds into
+        // every speed-up, and it actually draws — with it, the bottom-right
+        // corner differs from the badge-less composer inside its window and
+        // matches it outside; a window without it draws nothing.
+        let mixed = ZoomPlan(segments: [], speeds: [
+            SpeedWindow(start: 0.5, end: 1.5, rate: 4, badge: true), SpeedWindow(start: 2, rate: 2),
+        ])
+        let mixedJSON = try JSONEncoder().encode(mixed)
+        let mixedObj = try JSONSerialization.jsonObject(with: mixedJSON) as? [String: Any]
+        let mixedSpeeds = mixedObj?["speeds"] as? [[String: Any]]
+        guard mixedObj?["speedBadge"] == nil, mixedSpeeds?.count == 2,
+              mixedSpeeds?[0]["badge"] as? Bool == true, mixedSpeeds?[1]["badge"] == nil else {
+            throw fail("badge not encoded per speed-up: \(String(decoding: mixedJSON, as: UTF8.self))")
+        }
+        guard try JSONDecoder().decode(ZoomPlan.self, from: mixedJSON).speeds.map(\.badge) == [true, false] else {
+            throw fail("per-speed-up badge did not round-trip")
+        }
+        let legacy = Data("""
+        {"version":1,"segments":[],"speedBadge":true,
+         "speeds":[{"id":"\(UUID().uuidString)","start":0.5,"end":1.5,"rate":4}]}
+        """.utf8)
+        guard try JSONDecoder().decode(ZoomPlan.self, from: legacy).speeds.map(\.badge) == [true] else {
+            throw fail("plan-wide speedBadge did not fold into the speed-ups")
+        }
+        let badgedRanges = SpeedWindow.ranges(of: mixed.speeds, duration: duration)
 
         let meta = try recording.loadMeta()
         let keys = [ZoomPlanner.Keyframe(t: 0, camera: Camera(
             zoom: 1, center: CGPoint(x: Double(meta.pixelWidth) / 2, y: Double(meta.pixelHeight) / 2)
         ))]
         let plain = FrameComposer(meta: meta, keys: keys, cursorStyle: .classic)
-        let badged = FrameComposer(meta: meta, keys: keys, cursorStyle: .classic, speedBadges: sped)
+        let badged = FrameComposer(meta: meta, keys: keys, cursorStyle: .classic, speeds: badgedRanges)
         let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
             .cropped(to: CGRect(x: 0, y: 0, width: meta.pixelWidth, height: meta.pixelHeight))
         let ciContext = CIContext()
@@ -821,12 +901,15 @@ enum SelfTest {
         guard corner(badged.compose(source: grey, at: 1.9)) == corner(plain.compose(source: grey, at: 1.9)) else {
             throw fail("badge drawn outside its window")
         }
+        guard corner(badged.compose(source: grey, at: 2.5)) == corner(plain.compose(source: grey, at: 2.5)) else {
+            throw fail("badge drawn for a speed-up that didn't ask for it")
+        }
 
         // A 4× speed-up over the middle second exports 2s of master as 1.25s.
         let segments = [ZoomSegment(start: 0.4, end: 1.4, zoom: 2.2)]
         recording.savePlan(ZoomPlan(segments: segments, speeds: [SpeedWindow(start: 0.5, end: 1.5, rate: 4)]))
         let url = try await Renderer().export(recording: recording) { _ in }
-        guard url.lastPathComponent == "export 5.mov" else { throw fail("sped export named \(url.lastPathComponent)") }
+        guard url.lastPathComponent == "\(recording.name) 5.mov" else { throw fail("sped export named \(url.lastPathComponent)") }
         let length = try await AVURLAsset(url: url).load(.duration).seconds
         guard abs(length - 1.25) < 0.25 else { throw fail("sped export runs \(length)s, not 1.25s") }
         let snapshot = Recording.loadPlan(from: Recording.planSnapshotURL(for: url))
@@ -842,6 +925,7 @@ enum SelfTest {
         case compare(String)
         case trimClips(String)
         case speeds(String)
+        case rename(String)
         case writerFailed
         case noTrack
         case badDuration(Double)

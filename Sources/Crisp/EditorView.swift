@@ -78,8 +78,9 @@ struct EditorView: View {
     /// The rate the next speed-up starts with — what the toolbar's rate
     /// button shows while the playhead isn't on a speed-up.
     @State var speedRate: Double = SpeedWindow.defaultRate
-    /// Draw the rate in the video's bottom-right corner while a speed-up
-    /// plays (preview and exports). Saved with the plan.
+    /// Whether the next speed-up starts badged (its rate drawn in the
+    /// video's corner) — what the rate menu's checkbox shows while the
+    /// playhead isn't on a speed-up. Each speed-up keeps its own flag.
     @State var speedBadge = false
     /// A keyframe being dragged along the timeline, with the time it had
     /// when the drag began so it tracks the pointer instead of jumping to it.
@@ -222,13 +223,11 @@ struct EditorView: View {
         }
         .onChange(of: cursorStyle) { _, _ in scheduleRebuild() }
         .onChange(of: clips) { _, _ in schedulePlanSave() }
-        .onChange(of: speeds) { _, _ in
+        .onChange(of: speeds) { old, new in
             // The badge windows are baked into the preview composition.
-            if speedBadge { player.currentItem?.videoComposition = makeComposition() }
-            schedulePlanSave()
-        }
-        .onChange(of: speedBadge) { _, _ in
-            player.currentItem?.videoComposition = makeComposition()
+            if old.contains(where: \.badge) || new.contains(where: \.badge) {
+                player.currentItem?.videoComposition = makeComposition()
+            }
             schedulePlanSave()
         }
         .onChange(of: trim) { _, _ in schedulePlanSave() }
@@ -263,7 +262,6 @@ struct EditorView: View {
                 trim = plan?.trim ?? Trim()
                 clips = plan?.clips ?? []
                 speeds = plan?.speeds ?? []
-                speedBadge = plan?.speedBadge ?? false
                 segments = plan?.segments ?? autoSegments()
                 cursorStyle = plan?.cursorStyle ?? .classic
                 cameraKeys = planner().keyframes(from: segments, duration: duration)
@@ -413,7 +411,7 @@ struct EditorView: View {
     func currentPlan(segments: [ZoomSegment]? = nil, cursorStyle: CursorStyle? = nil) -> ZoomPlan {
         ZoomPlan(
             segments: segments ?? self.segments, cursorStyle: cursorStyle ?? self.cursorStyle,
-            trim: trim, clips: clips, speeds: speeds, speedBadge: speedBadge
+            trim: trim, clips: clips, speeds: speeds
         )
     }
 

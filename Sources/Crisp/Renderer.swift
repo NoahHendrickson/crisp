@@ -24,9 +24,9 @@ final class Renderer {
     }()
 
     /// Writes a new, never-overwriting export file next to the master and
-    /// returns its URL: "export.mov" (numbered after the first) for the
-    /// whole video inside the plan's trim, "clip N.mov" (numbered after the
-    /// first run) for `clip`. Either is the master from its start to its
+    /// returns its URL: "<name>.mov" (numbered after the first) for the
+    /// whole video inside the plan's trim, "<name> clip N.mov" (numbered
+    /// after the first run) for `clip`, where <name> is the recording's. Either is the master from its start to its
     /// end, re-timed to start at zero; the zooms and cursor stay where they
     /// were recorded.
     @discardableResult
@@ -57,12 +57,9 @@ final class Renderer {
         // The plan's speed-ups compress their stretches of the output; the
         // zooms and cursor stay on the master clock, so a sped stretch shows
         // the same footage, just faster — with the rate badged in the corner
-        // when the plan asks for it.
+        // when that speed-up asks for it.
         let speeds = SpeedWindow.ranges(of: plan?.speeds ?? [], duration: duration)
-        let composer = FrameComposer(
-            meta: meta, keys: keys, cursorStyle: cursorStyle,
-            speedBadges: (plan?.speedBadge ?? false) ? speeds : []
-        )
+        let composer = FrameComposer(meta: meta, keys: keys, cursorStyle: cursorStyle, speeds: speeds)
         // The stretch of the master that renders; output time 0 is `from`.
         let window = clip.map { $0.start...$0.end } ?? (plan?.trim ?? Trim()).range(duration: duration)
         let from = min(max(window.lowerBound, 0), duration)

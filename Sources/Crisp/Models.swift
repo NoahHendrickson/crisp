@@ -292,6 +292,43 @@ struct SpeedWindow: Codable, Identifiable, Equatable {
     var end: Double? = nil
     /// Fast-forward factor (> 1); slow motion may extend this later.
     var rate: Double = SpeedWindow.defaultRate
+    /// Draw the rate ("3×") in the video's bottom-right corner while this
+    /// speed-up plays, in the preview and every export. Per speed-up: one
+    /// can badge while the next stays silent.
+    var badge = false
+
+    init(
+        id: UUID = UUID(), start: Double, end: Double? = nil,
+        rate: Double = SpeedWindow.defaultRate, badge: Bool = false
+    ) {
+        self.id = id
+        self.start = start
+        self.end = end
+        self.rate = rate
+        self.badge = badge
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, start, end, rate, badge }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        start = try container.decode(Double.self, forKey: .start)
+        end = try container.decodeIfPresent(Double.self, forKey: .end)
+        rate = try container.decode(Double.self, forKey: .rate)
+        badge = try container.decodeIfPresent(Bool.self, forKey: .badge) ?? false
+    }
+
+    /// `badge` is omitted at its default so an unbadged plan round-trips
+    /// unchanged.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(start, forKey: .start)
+        try container.encodeIfPresent(end, forKey: .end)
+        try container.encode(rate, forKey: .rate)
+        if badge { try container.encode(badge, forKey: .badge) }
+    }
 
     /// The shortest speed-up.
     static let minLength = 0.5
@@ -305,6 +342,7 @@ struct SpeedWindow: Codable, Identifiable, Equatable {
         var start: Double
         var end: Double
         var rate: Double
+        var badge: Bool
         var length: Double { end - start }
     }
 
@@ -319,7 +357,9 @@ struct SpeedWindow: Codable, Identifiable, Equatable {
             var end = min(window.end ?? duration, duration)
             if i + 1 < sorted.count { end = min(end, sorted[i + 1].start) }
             guard end > start + 1e-6 else { continue }
-            out.append(Range(id: window.id, start: start, end: end, rate: max(1, window.rate)))
+            out.append(Range(
+                id: window.id, start: start, end: end, rate: max(1, window.rate), badge: window.badge
+            ))
         }
         return out
     }
@@ -369,24 +409,23 @@ struct ZoomPlan: Codable {
     var trim = Trim()
     var clips: [Clip] = []
     var speeds: [SpeedWindow] = []
-    /// Draw the rate ("3×") in the video's bottom-right corner while a
-    /// speed-up plays, in the preview and every export.
-    var speedBadge = false
 
     init(
         segments: [ZoomSegment], cursorStyle: CursorStyle = .classic, trim: Trim = Trim(),
-        clips: [Clip] = [], speeds: [SpeedWindow] = [], speedBadge: Bool = false
+        clips: [Clip] = [], speeds: [SpeedWindow] = []
     ) {
         self.segments = segments
         self.cursorStyle = cursorStyle
         self.trim = trim
         self.clips = clips
         self.speeds = speeds
-        self.speedBadge = speedBadge
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, segments, cursorStyle, trim, clips, speeds, speedBadge
+        case version, segments, cursorStyle, trim, clips, speeds
+        /// Pre-0.2.1 plans badged every speed-up with one flag; read once
+        /// and folded into each speed-up's `badge`.
+        case speedBadge
     }
 
     init(from decoder: Decoder) throws {
@@ -397,7 +436,9 @@ struct ZoomPlan: Codable {
         trim = try container.decodeIfPresent(Trim.self, forKey: .trim) ?? Trim()
         clips = try container.decodeIfPresent([Clip].self, forKey: .clips) ?? []
         speeds = try container.decodeIfPresent([SpeedWindow].self, forKey: .speeds) ?? []
-        speedBadge = try container.decodeIfPresent(Bool.self, forKey: .speedBadge) ?? false
+        if try container.decodeIfPresent(Bool.self, forKey: .speedBadge) ?? false {
+            for i in speeds.indices { speeds[i].badge = true }
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -408,7 +449,6 @@ struct ZoomPlan: Codable {
         if !trim.isDefault { try container.encode(trim, forKey: .trim) }
         if !clips.isEmpty { try container.encode(clips, forKey: .clips) }
         if !speeds.isEmpty { try container.encode(speeds, forKey: .speeds) }
-        if speedBadge { try container.encode(speedBadge, forKey: .speedBadge) }
     }
 
     /// The clips as they export (see `Clip.ranges`).
@@ -418,8 +458,8 @@ struct ZoomPlan: Codable {
 }
 
 /// A recording on disk: a folder containing master.mov + events.json
-/// (+ export.mov / export 2.mp4 / clip 1.mov / … after exports, each with
-/// a .plan.json snapshot beside it).
+/// (+ "<name>.mov" / "<name> 2.mp4" / "<name> clip 1.mov" / … after
+/// exports, each with a .plan.json snapshot beside it).
 struct Recording: Identifiable, Equatable {
     var id: URL { folder }
     var folder: URL
@@ -463,36 +503,71 @@ struct Recording: Identifiable, Equatable {
 
     var name: String { folder.lastPathComponent }
 
-    /// Existing whole-video exports, oldest first ("export.mov",
-    /// "export 2.mp4", …).
-    var exportURLs: [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        return names
-            .compactMap { name -> (Int, String)? in
-                let url = URL(fileURLWithPath: name)
-                guard ExportFormat.fileExtensions.contains(url.pathExtension.lowercased()),
-                      let index = Self.exportIndex(of: url.deletingPathExtension().lastPathComponent)
-                else { return nil }
-                return (index, name)
-            }
-            .sorted { $0.0 < $1.0 }
-            .map { folder.appendingPathComponent($0.1) }
+    /// Which export a file in the folder is, read off its stem. Exports are
+    /// named after the recording — "<name>", "<name> 2", "<name> clip 1",
+    /// "<name> clip 1 (2)" — so the files match the sidebar after a rename
+    /// (`renamed(to:)` moves them along with the folder). Stems from before
+    /// that scheme ("export", "export 2", "clip 1") still count, so an old
+    /// library keeps its exports until it is renamed.
+    enum ExportKey: Equatable {
+        case whole(index: Int)
+        case clip(number: Int, run: Int)
     }
 
-    /// Existing clip exports, by clip number then by run ("clip 1.mov",
-    /// "clip 1 (2).mov", "clip 2.mov", …).
-    var clipExportURLs: [URL] {
+    /// The name-based stems come first so a recording called "clip 1" still
+    /// tells its own whole-video export from a clip.
+    func exportKey(of stem: String) -> ExportKey? {
+        if let index = Self.exportIndex(of: stem, prefix: name) { return .whole(index: index) }
+        if let key = Self.clipExportKey(of: stem, prefix: "\(name) clip ") { return .clip(number: key.number, run: key.run) }
+        if let index = Self.exportIndex(of: stem, prefix: "export") { return .whole(index: index) }
+        if let key = Self.clipExportKey(of: stem, prefix: "clip ") { return .clip(number: key.number, run: key.run) }
+        return nil
+    }
+
+    /// The stem an export is written under today (no extension).
+    func exportStem(for key: ExportKey) -> String {
+        switch key {
+        case .whole(let index):
+            return index == 1 ? name : "\(name) \(index)"
+        case .clip(let number, let run):
+            return run == 1 ? "\(name) clip \(number)" : "\(name) clip \(number) (\(run))"
+        }
+    }
+
+    /// Every export in the folder with what it is, in directory order.
+    private var keyedExports: [(key: ExportKey, url: URL)] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        return names
-            .compactMap { name -> (Int, Int, String)? in
-                let url = URL(fileURLWithPath: name)
-                guard ExportFormat.fileExtensions.contains(url.pathExtension.lowercased()),
-                      let key = Self.clipExportKey(of: url.deletingPathExtension().lastPathComponent)
-                else { return nil }
-                return (key.number, key.run, name)
+        return names.compactMap { name in
+            let url = URL(fileURLWithPath: name)
+            guard ExportFormat.fileExtensions.contains(url.pathExtension.lowercased()),
+                  let key = exportKey(of: url.deletingPathExtension().lastPathComponent)
+            else { return nil }
+            return (key, folder.appendingPathComponent(name))
+        }
+    }
+
+    /// Existing whole-video exports, oldest first ("<name>.mov",
+    /// "<name> 2.mp4", …).
+    var exportURLs: [URL] {
+        keyedExports
+            .compactMap { entry -> (Int, URL)? in
+                guard case .whole(let index) = entry.key else { return nil }
+                return (index, entry.url)
+            }
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+
+    /// Existing clip exports, by clip number then by run ("<name> clip 1.mov",
+    /// "<name> clip 1 (2).mov", "<name> clip 2.mov", …).
+    var clipExportURLs: [URL] {
+        keyedExports
+            .compactMap { entry -> (Int, Int, URL)? in
+                guard case .clip(let number, let run) = entry.key else { return nil }
+                return (number, run, entry.url)
             }
             .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
-            .map { folder.appendingPathComponent($0.2) }
+            .map(\.2)
     }
 
     /// What the library sidebar shows under a recording's name: the container
@@ -524,46 +599,79 @@ struct Recording: Identifiable, Equatable {
         )
     }
 
-    /// Next unused export filename: "export.<ext>", then "export 2.<ext>",
-    /// "export 3.<ext>", … Numbering is shared across formats so re-exports
-    /// never overwrite an earlier one, whatever container it used.
+    /// Next unused whole-video export filename: "<name>.<ext>", then
+    /// "<name> 2.<ext>", "<name> 3.<ext>", … Numbering is shared across
+    /// formats so re-exports never overwrite an earlier one, whatever
+    /// container it used.
     func nextExportURL(for format: ExportFormat) -> URL {
-        let used = Set(exportURLs.compactMap {
-            Self.exportIndex(of: $0.deletingPathExtension().lastPathComponent)
+        let used = Set(keyedExports.compactMap { entry -> Int? in
+            guard case .whole(let index) = entry.key else { return nil }
+            return index
         })
         var index = 1
         while used.contains(index) { index += 1 }
-        let stem = index == 1 ? "export" : "export \(index)"
-        return folder.appendingPathComponent(stem).appendingPathExtension(format.fileExtension)
+        return folder.appendingPathComponent(exportStem(for: .whole(index: index)))
+            .appendingPathExtension(format.fileExtension)
     }
 
-    /// Next unused filename for clip `number`: "clip 1.<ext>", then
-    /// "clip 1 (2).<ext>", "clip 1 (3).<ext>", … — a re-export never
-    /// overwrites an earlier run, whatever container it used.
+    /// Next unused filename for clip `number`: "<name> clip 1.<ext>", then
+    /// "<name> clip 1 (2).<ext>", "<name> clip 1 (3).<ext>", … — a re-export
+    /// never overwrites an earlier run, whatever container it used.
     func nextClipExportURL(number: Int, for format: ExportFormat) -> URL {
-        let used = Set(clipExportURLs.compactMap { url -> Int? in
-            let key = Self.clipExportKey(of: url.deletingPathExtension().lastPathComponent)
-            return key?.number == number ? key?.run : nil
+        let used = Set(keyedExports.compactMap { entry -> Int? in
+            guard case .clip(number, let run) = entry.key else { return nil }
+            return run
         })
         var run = 1
         while used.contains(run) { run += 1 }
-        let stem = run == 1 ? "clip \(number)" : "clip \(number) (\(run))"
-        return folder.appendingPathComponent(stem).appendingPathExtension(format.fileExtension)
+        return folder.appendingPathComponent(exportStem(for: .clip(number: number, run: run)))
+            .appendingPathExtension(format.fileExtension)
     }
 
-    /// "export" → 1, "export 2" → 2, anything else → nil.
-    private static func exportIndex(of stem: String) -> Int? {
-        if stem == "export" { return 1 }
-        guard stem.hasPrefix("export "), let n = Int(stem.dropFirst("export ".count)), n >= 2 else {
+    /// Moves the folder to `newName` beside it and renames every export (and
+    /// its plan snapshot) inside to carry the new name, returning the moved
+    /// recording. The folder move is the only step that can throw; a file
+    /// that can't follow (its target already exists) keeps its old stem,
+    /// which `exportKey(of:)` no longer recognises unless it is a legacy one.
+    func renamed(to newName: String) throws -> Recording {
+        let fm = FileManager.default
+        let dest = Recording(folder: folder.deletingLastPathComponent().appendingPathComponent(newName, isDirectory: true))
+        // Pair each file with its new stem before the move: after it, the
+        // old stems no longer parse under the new name.
+        let moves: [(from: String, to: String)] = keyedExports.flatMap { entry -> [(String, String)] in
+            let stem = dest.exportStem(for: entry.key)
+            let ext = entry.url.pathExtension
+            let oldStem = entry.url.deletingPathExtension().lastPathComponent
+            guard stem != oldStem else { return [] }
+            var pairs = [(entry.url.lastPathComponent, "\(stem).\(ext)")]
+            let snapshot = Self.planSnapshotURL(for: entry.url)
+            if fm.fileExists(atPath: snapshot.path) {
+                pairs.append((snapshot.lastPathComponent, "\(stem).plan.json"))
+            }
+            return pairs
+        }
+        try fm.moveItem(at: folder, to: dest.folder)
+        for move in moves {
+            let to = dest.folder.appendingPathComponent(move.to)
+            guard !fm.fileExists(atPath: to.path) else { continue }
+            try? fm.moveItem(at: dest.folder.appendingPathComponent(move.from), to: to)
+        }
+        return dest
+    }
+
+    /// "<prefix>" → 1, "<prefix> 2" → 2, anything else → nil.
+    private static func exportIndex(of stem: String, prefix: String) -> Int? {
+        if stem == prefix { return 1 }
+        guard stem.hasPrefix(prefix + " "), let n = Int(stem.dropFirst(prefix.count + 1)), n >= 2 else {
             return nil
         }
         return n
     }
 
-    /// "clip 3" → (3, 1), "clip 3 (2)" → (3, 2), anything else → nil.
-    private static func clipExportKey(of stem: String) -> (number: Int, run: Int)? {
-        guard stem.hasPrefix("clip ") else { return nil }
-        let rest = stem.dropFirst("clip ".count)
+    /// "<prefix>3" → (3, 1), "<prefix>3 (2)" → (3, 2), anything else → nil.
+    private static func clipExportKey(of stem: String, prefix: String) -> (number: Int, run: Int)? {
+        guard stem.hasPrefix(prefix) else { return nil }
+        let rest = stem.dropFirst(prefix.count)
         let parts = rest.split(separator: " ", maxSplits: 1)
         guard let first = parts.first, let number = Int(first), number >= 1 else { return nil }
         if parts.count == 1 { return (number, 1) }

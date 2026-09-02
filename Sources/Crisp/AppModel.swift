@@ -890,7 +890,8 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// Renames the recording folder. No-op if the name is unchanged, empty,
+    /// Renames the recording folder and the exports inside it (see
+    /// `Recording.renamed(to:)`). No-op if the name is unchanged, empty,
     /// contains path characters, collides with an existing folder, or the
     /// recording is in use (see `renameBlocker`).
     func rename(_ recording: Recording, to newName: String) {
@@ -902,8 +903,9 @@ final class AppModel: ObservableObject {
         let dest = recording.folder.deletingLastPathComponent().appendingPathComponent(trimmed)
         guard !FileManager.default.fileExists(atPath: dest.path) else { return }
         do {
-            try FileManager.default.moveItem(at: recording.folder, to: dest)
+            _ = try recording.renamed(to: trimmed)
         } catch {
+            Self.log("rename failed: \(error.localizedDescription)")
             return
         }
         reloadRecordings()

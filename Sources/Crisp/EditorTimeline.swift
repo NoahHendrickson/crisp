@@ -579,7 +579,7 @@ extension EditorView {
         let rate = String(format: "%g×", window.rate)
         let help = open
             ? "Speeding up \(rate), open from \(shortTimecode(window.start)) — scrub ahead and End the speed-up where the video should run normally again (it runs to \(shortTimecode(window.end)) meanwhile); right-click to set the rate or remove"
-            : "Speed up \(rate): \(shortTimecode(window.start))–\(shortTimecode(window.end)) plays that much faster in every export (\(String(format: "%.1fs", window.length)) becomes \(String(format: "%.1fs", window.length / window.rate))); drag the edges to change when; right-click to set the rate or remove"
+            : "Speed up \(rate)\(window.badge ? ", badged on the video" : ""): \(shortTimecode(window.start))–\(shortTimecode(window.end)) plays that much faster in every export (\(String(format: "%.1fs", window.length)) becomes \(String(format: "%.1fs", window.length / window.rate))); drag the edges to change when; right-click to set the rate, badge it, or remove"
 
         bar(Theme.speedBar)
             .frame(width: barW, height: Self.rowHeight)
@@ -620,7 +620,12 @@ extension EditorView {
                 .init(title: String(format: "Speed up %g×", r), checked: r == window.rate) {
                     setSpeedRate(r, for: window.id)
                 }
-            } + [.init(title: "Remove this speed-up") { removeSpeed(window.id) }],
+            } + [
+                .init(title: "Show rate on the video", checked: window.badge) {
+                    setSpeedBadge(!window.badge, for: window.id)
+                },
+                .init(title: "Remove this speed-up") { removeSpeed(window.id) },
+            ],
             enabled: !aiChat.running
         )
         .frame(width: barW, height: Self.rowHeight)

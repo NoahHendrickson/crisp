@@ -16,14 +16,16 @@ final class FrameComposer: FrameComposing {
     private let clicks: [MouseEvent]
     private let cursor: CursorSprite
     private let rippleScale: Double
-    /// While `t` is inside one of these, its rate is drawn in the
-    /// bottom-right corner (plan.speedBadge; empty when the badge is off).
+    /// The speed-ups that asked for a badge: while `t` is inside one, its
+    /// rate is drawn in the bottom-right corner.
     private let speedBadges: [SpeedWindow.Range]
     private let badge: SpeedBadgeSprite
 
+    /// `speeds` are the plan's speed-ups as they apply; only those with
+    /// `badge` set draw anything.
     init(
         meta: RecordingMeta, keys: [ZoomPlanner.Keyframe], cursorStyle: CursorStyle,
-        speedBadges: [SpeedWindow.Range] = []
+        speeds: [SpeedWindow.Range] = []
     ) {
         self.width = Double(meta.pixelWidth)
         self.height = Double(meta.pixelHeight)
@@ -32,7 +34,7 @@ final class FrameComposer: FrameComposing {
         self.clicks = meta.events.filter { $0.kind == .leftDown }
         self.cursor = CursorSprite(style: cursorStyle, scaleFactor: meta.scaleFactor)
         self.rippleScale = meta.scaleFactor
-        self.speedBadges = speedBadges
+        self.speedBadges = speeds.filter(\.badge)
         self.badge = SpeedBadgeSprite(frameHeight: Double(meta.pixelHeight))
     }
 
@@ -204,7 +206,8 @@ private final class CursorSprite {
         }
     }
 
-    // MARK: - Classic: flat black fill, white outline
+    // MARK: - Classic: the system cursors — black arrow and I-beam with a white
+    // outline, white pointing hand with a black rim
 
     private static func classicSprites() -> [CursorKind: Sprite] {
         var built: [CursorKind: Sprite] = [:]
@@ -217,7 +220,7 @@ private final class CursorSprite {
         }
         // 32×32 so NSCursor.pointingHand.hotSpot (13, 8) applies directly.
         if let image = rasterize(width: 32, height: 32, draw: { ctx in
-            strokeAndFill(classicPointerPath(), in: ctx)
+            drawClassicPointer(in: ctx)
         }) {
             built[.pointer] = Sprite(image: image, hotSpot: CGPoint(x: 13, y: 8), pointSize: CGSize(width: 32, height: 32))
         }
@@ -243,28 +246,137 @@ private final class CursorSprite {
         return path
     }
 
-    /// Pointing hand in a 32×32 box; index fingertip at (13, 8).
-    private static func classicPointerPath() -> CGPath {
+    /// The macOS pointing hand: white face inside a 1pt black rim with a soft
+    /// drop shadow, in a 32×32 box with the index fingertip at (13, 8). Built
+    /// from one capsule per finger over a palm-and-thumb shape, so the rim
+    /// between fingers falls out of the overlap instead of being traced.
+    private static func drawClassicPointer(in ctx: CGContext) {
+        // Finger centre x and tip-cap centre y: index, middle, ring, pinky.
+        let fingers: [(cx: CGFloat, tip: CGFloat)] = [(13.75, 8.75), (16.25, 13.5), (18.75, 14.5), (20.75, 15.75)]
+        let black = CGColor(gray: 0, alpha: 1)
+        let white = CGColor(gray: 1, alpha: 1)
+
+        ctx.saveGState()
+        // Shadow offset and blur are in device pixels, so scale by the raster.
+        ctx.setShadow(
+            offset: CGSize(width: 0.4 * raster, height: -1.0 * raster),
+            blur: 1.6 * raster,
+            color: CGColor(gray: 0, alpha: 0.45)
+        )
+        ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+        ctx.setFillColor(black)
+        ctx.addPath(pointerPalmSilhouette())
+        ctx.fillPath()
+        for finger in fingers {
+            ctx.addPath(capsule(cx: finger.cx, top: finger.tip, bottom: 20, halfWidth: 1.75))
+            ctx.fillPath()
+        }
+        ctx.endTransparencyLayer()
+        ctx.restoreGState()
+
+        ctx.setFillColor(white)
+        ctx.addPath(pointerPalmFace())
+        ctx.fillPath()
+        for finger in fingers {
+            ctx.addPath(capsule(cx: finger.cx, top: finger.tip, bottom: 17, halfWidth: 0.75))
+            ctx.fillPath()
+        }
+        ctx.setFillColor(black)
+        ctx.addPath(pointerThumbCrease())
+        ctx.fillPath()
+    }
+
+    /// Black outer shape of the palm and thumb, including the slit between the
+    /// thumb and index finger. The finger capsules sit on top.
+    private static func pointerPalmSilhouette() -> CGPath {
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 13.0, y: 8.0))
-        path.addLine(to: CGPoint(x: 10.7, y: 8.7))
-        path.addLine(to: CGPoint(x: 10.7, y: 19.2))
-        path.addLine(to: CGPoint(x: 6.0, y: 17.4))
-        path.addLine(to: CGPoint(x: 4.6, y: 19.0))
-        path.addLine(to: CGPoint(x: 4.6, y: 23.2))
-        path.addLine(to: CGPoint(x: 7.4, y: 26.6))
-        path.addLine(to: CGPoint(x: 10.4, y: 28.8))
-        path.addLine(to: CGPoint(x: 20.6, y: 28.8))
-        path.addLine(to: CGPoint(x: 23.6, y: 25.6))
-        path.addLine(to: CGPoint(x: 23.6, y: 21.0))
-        path.addLine(to: CGPoint(x: 21.5, y: 19.0))
-        path.addLine(to: CGPoint(x: 21.5, y: 16.5))
-        path.addLine(to: CGPoint(x: 19.5, y: 15.0))
-        path.addLine(to: CGPoint(x: 19.5, y: 13.0))
-        path.addLine(to: CGPoint(x: 15.6, y: 12.5))
-        path.addLine(to: CGPoint(x: 15.6, y: 8.7))
+        path.move(to: CGPoint(x: 8, y: 16.5))
+        path.addLine(to: CGPoint(x: 8, y: 15.25))
+        addCapOverTop(path, cx: 9.75, cy: 15.25, r: 1.75)
+        path.addLine(to: CGPoint(x: 11.5, y: 16.7))
+        path.addLine(to: CGPoint(x: 12.5, y: 16.7))
+        path.addLine(to: CGPoint(x: 12.5, y: 16))
+        path.addLine(to: CGPoint(x: 22.5, y: 16))
+        path.addLine(to: CGPoint(x: 22.5, y: 22.3))
+        path.addCurve(
+            to: CGPoint(x: 19, y: 25.5),
+            control1: CGPoint(x: 22.5, y: 24.2), control2: CGPoint(x: 21.3, y: 25.5)
+        )
+        path.addLine(to: CGPoint(x: 14.5, y: 25.5))
+        path.addCurve(
+            to: CGPoint(x: 11.4, y: 23.2),
+            control1: CGPoint(x: 12.8, y: 25.5), control2: CGPoint(x: 11.8, y: 24.4)
+        )
         path.closeSubpath()
         return path
+    }
+
+    /// White face of the palm and thumb, 1pt inside the silhouette. Its top
+    /// edge steps down toward the pinky so each finger gap ends at its own depth.
+    private static func pointerPalmFace() -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 13, y: 15.25))
+        path.addLine(to: CGPoint(x: 17.25, y: 15.25))
+        path.addLine(to: CGPoint(x: 17.25, y: 16))
+        path.addLine(to: CGPoint(x: 19.6, y: 16))
+        path.addLine(to: CGPoint(x: 19.6, y: 16.5))
+        path.addLine(to: CGPoint(x: 21.5, y: 16.5))
+        path.addLine(to: CGPoint(x: 21.5, y: 22))
+        path.addCurve(
+            to: CGPoint(x: 18.5, y: 24.5),
+            control1: CGPoint(x: 21.5, y: 23.3), control2: CGPoint(x: 20.3, y: 24.5)
+        )
+        path.addLine(to: CGPoint(x: 15, y: 24.5))
+        path.addCurve(
+            to: CGPoint(x: 12.3, y: 22.8),
+            control1: CGPoint(x: 13.5, y: 24.5), control2: CGPoint(x: 12.6, y: 23.7)
+        )
+        path.addLine(to: CGPoint(x: 9, y: 15.75))
+        path.addLine(to: CGPoint(x: 9, y: 15.25))
+        addCapOverTop(path, cx: 9.75, cy: 15.25, r: 0.75)
+        path.closeSubpath()
+        return path
+    }
+
+    /// Black wedge between the thumb and the index finger, rounded where it
+    /// meets the palm.
+    private static func pointerThumbCrease() -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 10.5, y: 14.5))
+        path.addLine(to: CGPoint(x: 13, y: 14.5))
+        path.addLine(to: CGPoint(x: 13, y: 17.8))
+        path.addCurve(
+            to: CGPoint(x: 12, y: 18.5),
+            control1: CGPoint(x: 13, y: 18.3), control2: CGPoint(x: 12.5, y: 18.5)
+        )
+        path.addLine(to: CGPoint(x: 11.5, y: 18.2))
+        path.addLine(to: CGPoint(x: 11.5, y: 17.5))
+        path.closeSubpath()
+        return path
+    }
+
+    /// Vertical capsule with a round top centred at (cx, top) and a flat bottom.
+    private static func capsule(cx: CGFloat, top: CGFloat, bottom: CGFloat, halfWidth: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: cx - halfWidth, y: bottom))
+        path.addLine(to: CGPoint(x: cx - halfWidth, y: top))
+        addCapOverTop(path, cx: cx, cy: top, r: halfWidth)
+        path.addLine(to: CGPoint(x: cx + halfWidth, y: bottom))
+        path.closeSubpath()
+        return path
+    }
+
+    /// Semicircle from (cx - r, cy) over the top to (cx + r, cy), top-left space.
+    private static func addCapOverTop(_ path: CGMutablePath, cx: CGFloat, cy: CGFloat, r: CGFloat) {
+        let k: CGFloat = 0.5523
+        path.addCurve(
+            to: CGPoint(x: cx, y: cy - r),
+            control1: CGPoint(x: cx - r, y: cy - k * r), control2: CGPoint(x: cx - k * r, y: cy - r)
+        )
+        path.addCurve(
+            to: CGPoint(x: cx + r, y: cy),
+            control1: CGPoint(x: cx + k * r, y: cy - r), control2: CGPoint(x: cx + r, y: cy - k * r)
+        )
     }
 
     private static func classicIBeamPath() -> CGPath {
@@ -296,7 +408,7 @@ private final class CursorSprite {
         ctx.fillPath()
     }
 
-    // MARK: - Bevel: bundled cute arrow, matching hand and I-beam
+    // MARK: - Bevel: bundled cute arrow, used for every cursor kind
 
     /// Black outline around the white face; also the stroke used for the
     /// extruded side so the rim and the 3D depth read as one mass.
@@ -304,8 +416,8 @@ private final class CursorSprite {
     /// Down-right in the sprite's top-left space, matching cute-arrow.svg.
     private static let bevelExtrude = CGPoint(x: 2.0, y: 2.6)
 
-    /// Each shape sits inside a padded box so its rim, extrusion and shadow
-    /// never clip; hot spots are the shape's own plus the padding.
+    /// Only the arrow: the beveled hand and I-beam variants read badly, so
+    /// the cute arrow stands in for every kind via the composite fallback.
     private static func bevelSprites() -> [CursorKind: Sprite] {
         var built: [CursorKind: Sprite] = [:]
         let arrowBox = CGSize(width: 28, height: 30)
@@ -317,28 +429,6 @@ private final class CursorSprite {
                 image: image,
                 hotSpot: CGPoint(x: 4.25, y: 0.4),
                 pointSize: arrowBox
-            )
-        }
-        let handPad = CGPoint(x: 4, y: 4)
-        let handBox = CGSize(width: 36, height: 44)
-        if let image = rasterize(width: handBox.width, height: handBox.height, draw: { ctx in
-            bevel(classicPointerPath(), in: ctx, pad: handPad)
-        }) {
-            built[.pointer] = Sprite(
-                image: image,
-                hotSpot: CGPoint(x: 13 + handPad.x, y: 8 + handPad.y),
-                pointSize: handBox
-            )
-        }
-        let beamPad = CGPoint(x: 4, y: 4)
-        let beamBox = CGSize(width: 32, height: 34)
-        if let image = rasterize(width: beamBox.width, height: beamBox.height, draw: { ctx in
-            bevel(classicIBeamPath(), in: ctx, pad: beamPad)
-        }) {
-            built[.iBeam] = Sprite(
-                image: image,
-                hotSpot: CGPoint(x: 12 + beamPad.x, y: 11 + beamPad.y),
-                pointSize: beamBox
             )
         }
         return built

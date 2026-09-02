@@ -77,6 +77,11 @@ extension EditorView {
         speeds[i].rate = rate
     }
 
+    func setSpeedBadge(_ badge: Bool, for id: UUID) {
+        guard let i = speeds.firstIndex(where: { $0.id == id }) else { return }
+        speeds[i].badge = badge
+    }
+
     // MARK: - Preview composition
 
     func makeComposition() -> AVMutableVideoComposition? {
@@ -102,7 +107,7 @@ extension EditorView {
             : cameraKeys
         let composer = FrameComposer(
             meta: meta, keys: keys, cursorStyle: cursorStyle,
-            speedBadges: speedBadge ? speedRanges : []
+            speeds: speedRanges
         )
         return CameraCompositor.makeComposition(duration: clipDuration, composer: composer)
     }

@@ -313,7 +313,7 @@ extension EditorView {
 
     func startSpeedUp() {
         guard speedMove == .start, speedMoveEnabled else { return }
-        speeds.append(SpeedWindow(start: currentTime, rate: speedRate))
+        speeds.append(SpeedWindow(start: currentTime, rate: speedRate, badge: speedBadge))
     }
 
     func endSpeedUp() {
@@ -342,9 +342,17 @@ extension EditorView {
         return speedRate
     }
 
+    /// What the badge checkbox shows: the targeted speed-up's flag, else
+    /// the one the next speed-up starts with.
+    var speedBadgeValue: Bool {
+        if let window = speedAtPlayhead { return window.badge }
+        if let open = openSpeed { return open.badge }
+        return speedBadge
+    }
+
     /// The rate menu: the presets, then (behind a divider) the corner-badge
-    /// toggle. Picking a rate retargets the speed-up under the playhead (or
-    /// the open one), else the rate the next speed-up starts with.
+    /// toggle. Both edit the speed-up under the playhead (or the open one),
+    /// else what the next speed-up starts with.
     func speedRateItems() -> [DropdownItem] {
         var items = SpeedWindow.rates.map { rate in
             DropdownItem(
@@ -360,11 +368,17 @@ extension EditorView {
         }
         items.append(.divider("rate.divider"))
         items.append(DropdownItem(
-            id: "rate.badge", label: "Show rate on the video", checked: speedBadge,
-            detail: "Draws \"2×\" in the bottom-right corner while it's sped up, in the preview and every export",
+            id: "rate.badge", label: "Show rate on the video", checked: speedBadgeValue,
+            detail: speedRateTargetID != nil
+                ? "Draws the rate in the bottom-right corner while this speed-up plays, in the preview and every export"
+                : "Draws the rate in the bottom-right corner while the next speed-up plays, in the preview and every export",
             checkbox: true, keepsOpen: true
         ) {
-            speedBadge.toggle()
+            if let id = speedRateTargetID {
+                setSpeedBadge(!speedBadgeValue, for: id)
+            } else {
+                speedBadge.toggle()
+            }
         })
         return items
     }
@@ -486,7 +500,7 @@ extension EditorView {
                 ]
                 if ranges.count > 1 {
                     items.append(DropdownItem(id: "clips", label: "All \(ranges.count) clips",
-                                              detail: "One \(ext) file per clip: clip 1, clip 2, …") {
+                                              detail: "One \(ext) file per clip, named \(recording.name) clip 1 … clip \(ranges.count)") {
                         savePlanNow()
                         model.exportClips(recording)
                     })
@@ -494,7 +508,7 @@ extension EditorView {
                 for clip in ranges {
                     items.append(DropdownItem(
                         id: "clip.\(clip.id.uuidString)", label: "Clip \(clip.number)",
-                        detail: "\(shortTimecode(clip.start))–\(shortTimecode(clip.end)) (\(String(format: "%.1fs", clip.length))) as clip \(clip.number).\(model.exportFormat.fileExtension)"
+                        detail: "\(shortTimecode(clip.start))–\(shortTimecode(clip.end)) (\(String(format: "%.1fs", clip.length))) as \(recording.exportStem(for: .clip(number: clip.number, run: 1))).\(model.exportFormat.fileExtension)"
                     ) {
                         savePlanNow()
                         model.exportClips(recording, only: [clip.id])

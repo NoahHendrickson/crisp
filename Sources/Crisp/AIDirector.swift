@@ -44,7 +44,7 @@ struct AIModel: Identifiable, Equatable {
 
     /// Claude Code accepts aliases that always resolve to the latest release.
     static let claude: [AIModel] = [
-        AIModel(id: "fable", label: "Fable 5"),
+        AIModel(id: "fable", label: "Fable 5.1"),
         AIModel(id: "opus", label: "Opus 5"),
         AIModel(id: "sonnet", label: "Sonnet 5"),
         AIModel(id: "haiku", label: "Haiku 4.5"),

@@ -247,7 +247,7 @@ struct ButtonGroupSeparator: View {
 
 /// Underline tabs for the Window target menu (App Windows / Chrome Tabs).
 /// Active: Label/12 + 2pt foreground underline. Idle: Body/12 + text-secondary,
-/// with a transparent 2pt underline so the row stays 26pt.
+/// with a transparent 2pt underline so the row stays 34pt.
 struct TabsPicker<Item: Identifiable & Hashable>: View {
     let items: [Item]
     @Binding var selection: Item
@@ -262,7 +262,7 @@ struct TabsPicker<Item: Identifiable & Hashable>: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 26)
+        .frame(height: 34)
     }
 
     private struct TabTrigger: View {
@@ -277,8 +277,8 @@ struct TabsPicker<Item: Identifiable & Hashable>: View {
                     Text(title)
                         .font(Theme.font(active ? .label12 : .body12))
                         .foregroundStyle(active || hovering ? Theme.foreground : Theme.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
                     Rectangle()
                         .fill(active ? Theme.foreground : .clear)
                         .frame(height: 2)
