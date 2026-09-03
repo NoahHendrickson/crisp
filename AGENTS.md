@@ -28,8 +28,9 @@ polished videos with animated zooms.
   finalization so `master.mov` receives its movie metadata.
 - Chrome-tab capture activates the requested tab and records its whole Chrome
   window. Other app targets use the App Windows picker.
-- The bundled `crispctl` executable is the capture control API. `--agent-tool`
-  is a separate interface for inspecting and editing an existing recording.
+- The bundled `crisp-mcp` server is the preferred agent-facing capture API;
+  `crispctl` is its CLI fallback. `--agent-tool` is a separate interface for
+  inspecting and editing an existing recording.
 
 ## Agent-made demos
 

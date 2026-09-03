@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "Crisp", targets: ["Crisp"]),
         .executable(name: "crispctl", targets: ["CrispControl"]),
+        .executable(name: "crisp-mcp", targets: ["CrispMCP"]),
     ],
     targets: [
         .target(
@@ -23,6 +24,11 @@ let package = Package(
             name: "CrispControl",
             dependencies: ["CrispAutomationProtocol"],
             path: "Sources/CrispControl"
+        ),
+        .executableTarget(
+            name: "CrispMCP",
+            dependencies: ["CrispAutomationProtocol"],
+            path: "Sources/CrispMCP"
         ),
     ]
 )

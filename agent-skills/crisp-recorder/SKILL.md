@@ -5,9 +5,28 @@ description: Record a project demo, application window, browser tab, website, or
 
 # Crisp Recorder
 
-Use Crisp's bundled local control CLI for capture and computer control only for
-the demonstration inside the target. The CLI talks to the signed Crisp app, so
-Screen Recording permission and clean movie finalization stay with the app.
+Use Crisp's MCP recording tools when they are available and computer control
+only for the demonstration inside the target. The tools talk to the signed
+Crisp app, so Screen Recording permission and clean movie finalization stay
+with the app. Fall back to the bundled local control CLI when Crisp MCP tools
+are not connected.
+
+## MCP workflow
+
+1. Call `list_sources` when the exact target is uncertain. Prefer its exact
+   `source_id`; a unique `chrome_url`, `window`, or `display` selector also
+   works.
+2. Call `start_recording` and require a successful result whose status is
+   `recording` before demonstrating anything.
+3. Perform the requested actions with computer use. Keep them deliberate and
+   avoid unrelated notifications, credentials, or private tabs.
+4. Always call `stop_recording`. Require an `idle` result with `master` and
+   `events` paths, then confirm both files exist and `master.mov` is non-empty.
+   Use `get_recording_status` for diagnosis and never start a second recording
+   while one is active.
+
+The rest of this skill documents preparation, permissions, delivery, and the
+CLI fallback in detail.
 
 ## Prepare
 
@@ -25,7 +44,7 @@ Screen Recording permission and clean movie finalization stay with the app.
 4. Note the existing folders under `~/Movies/Crisp/` so the new artifact can be
    identified without relying only on its timestamp.
 
-## Select and start
+## Select and start with the CLI fallback
 
 Run `crisp sources --json` (substitute the resolved executable when it is not
 on `PATH`). Choose the exact `id` when possible, then start with:
