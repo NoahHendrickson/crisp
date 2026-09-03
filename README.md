@@ -69,6 +69,25 @@ source (display/window/region) at 10 bits in Display P3 and saves a
 gradient banding comes from; these aren't. Crisp's own windows are excluded
 from display/region shots.
 
+## Using Crisp with coding agents
+
+Crisp's capture controls have accessibility labels, so a computer-use agent
+can select an app window or Chrome tab, start a recording, demonstrate a
+project, reactivate Crisp, and stop cleanly. The reusable workflow is in
+[`agent-skills/crisp-recorder`](agent-skills/crisp-recorder/SKILL.md).
+
+To make it available to Codex and ChatGPT from every project on this Mac:
+
+```sh
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/agent-skills/crisp-recorder" ~/.agents/skills/crisp-recorder
+```
+
+Then prompts such as “record a short demo of this local web app with Crisp”
+can trigger the skill automatically, or invoke it explicitly as
+`$crisp-recorder`. This is a computer-use workflow, not a capture CLI: Crisp's
+existing `--agent-tool` commands operate on recordings after capture.
+
 ## Installing
 
 **[Download the latest version →](https://noahhendrickson.github.io/crisp/)**
