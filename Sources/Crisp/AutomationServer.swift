@@ -1,5 +1,6 @@
 import AppKit
 import CrispAutomationProtocol
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -29,86 +30,256 @@ final class AutomationServer {
             queue: .main
         ) { [weak self] notification in
             guard let id = notification.userInfo?["id"] as? String else { return }
-            Task { @MainActor in await self?.handle(id: id, bundleIdentifier: bundleIdentifier) }
+            Task {
+                await self?.handle(id: id, bundleIdentifier: bundleIdentifier, allowStart: true)
+            }
         }
 
-        for url in (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil
-        )) ?? [] where url.lastPathComponent.hasPrefix("request-") && url.pathExtension == "json" {
-            let id = url.deletingPathExtension().lastPathComponent
-                .replacingOccurrences(of: "request-", with: "")
-            Task { await handle(id: id, bundleIdentifier: bundleIdentifier) }
+        let pid = String(ProcessInfo.processInfo.processIdentifier)
+        try? Data(pid.utf8).write(
+            to: CrispAutomation.readyURL(bundleIdentifier: bundleIdentifier), options: .atomic
+        )
+        pruneOrphanResponses(in: directory)
+        for url in requestFiles(in: directory) {
+            let id = Self.requestID(from: url)
+            if Self.isStale(url) {
+                Self.removeRequestAndResponse(id: id, bundleIdentifier: bundleIdentifier)
+            } else {
+                // A start left by a killed client must never begin unattended.
+                Task { await handle(id: id, bundleIdentifier: bundleIdentifier, allowStart: false) }
+            }
         }
         AppModel.log("automation: ready for \(bundleIdentifier)")
     }
 
-    private func handle(id: String, bundleIdentifier: String) async {
+    private func handle(id: String, bundleIdentifier: String, allowStart: Bool) async {
         guard !handling.contains(id) else { return }
+        let requestURL = CrispAutomation.requestURL(id: id, bundleIdentifier: bundleIdentifier)
         let responseURL = CrispAutomation.responseURL(id: id, bundleIdentifier: bundleIdentifier)
         guard !FileManager.default.fileExists(atPath: responseURL.path) else { return }
         handling.insert(id)
         defer { handling.remove(id) }
 
-        let requestURL = CrispAutomation.requestURL(id: id, bundleIdentifier: bundleIdentifier)
         let response: AutomationResponse
         do {
             let data = try Data(contentsOf: requestURL)
             let request = try JSONDecoder().decode(AutomationRequest.self, from: data)
-            guard request.id == id else { throw AutomationError.message("Request ID does not match its filename.") }
-            guard abs(request.createdAt.timeIntervalSinceNow) < 120 else {
-                throw AutomationError.message("Ignoring a stale automation request.")
+            guard request.id == id else {
+                throw CrispAutomationError.message("Request ID does not match its filename.")
             }
-            response = try await execute(request)
+            guard abs(request.createdAt.timeIntervalSinceNow) < 120 else {
+                throw CrispAutomationError.message("Ignoring a stale automation request.")
+            }
+            guard allowStart || !request.command.isStart else {
+                throw CrispAutomationError.message(
+                    "Crisp finished launching after this start request was abandoned. Retry the request."
+                )
+            }
+            response = try await execute(request) {
+                FileManager.default.fileExists(atPath: requestURL.path)
+                    && Self.processIsRunning(request.clientProcessID)
+            }
         } catch {
-            response = AutomationResponse(requestID: id, ok: false, error: error.localizedDescription)
+            response = AutomationResponse(
+                requestID: id,
+                result: .failure(message: error.localizedDescription, status: AppModel.shared.automationStatus)
+            )
         }
 
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(response).write(to: responseURL, options: .atomic)
+            try? FileManager.default.removeItem(at: requestURL)
         } catch {
             AppModel.log("automation: could not write response \(id) — \(error.localizedDescription)")
         }
     }
 
-    private func execute(_ request: AutomationRequest) async throws -> AutomationResponse {
+    private func execute(
+        _ request: AutomationRequest, callerIsWaiting: () -> Bool
+    ) async throws -> AutomationResponse {
         let model = AppModel.shared
         switch request.command {
         case .status:
-            return AutomationResponse(
-                requestID: request.id, ok: true, status: model.automationStatus
-            )
+            return AutomationResponse(requestID: request.id, result: .status(model.automationStatus))
 
         case .sources:
-            let snapshot = try await model.automationSources()
+            let snapshot = try await availableSources(includeChrome: true)
             return AutomationResponse(
-                requestID: request.id, ok: true, warnings: snapshot.warnings,
-                status: model.automationStatus, sources: snapshot.sources
+                requestID: request.id,
+                result: .sources(
+                    status: model.automationStatus,
+                    sources: snapshot.items.map(\.info),
+                    warnings: snapshot.warnings
+                )
             )
 
-        case .start:
-            guard let selector = request.selector else {
-                throw AutomationError.message("Start requires a source selector.")
+        case .start(let selector, let automationCodec):
+            let includeChrome = selector.kind == .chromeURL
+                || (selector.kind == .source && selector.value.lowercased().hasPrefix("chrome:"))
+            let snapshot = try await availableSources(includeChrome: includeChrome)
+            let selected = try selector.resolve(in: snapshot.items.map(\.info))
+            guard let item = snapshot.items.first(where: { $0.info.id == selected.id }) else {
+                throw CrispAutomationError.message("That source is no longer available.")
             }
-            let folder = try await model.automationStart(selector: selector, codec: request.codec)
+            let source = try await captureSource(for: item)
+            guard callerIsWaiting() else {
+                throw CrispAutomationError.message("The recording request was cancelled before capture started.")
+            }
+            let codec = automationCodec.map(MasterCodec.init) ?? model.codec
+            guard let folder = await model.startRecording(source: source, codec: codec) else {
+                throw CrispAutomationError.message(
+                    model.automationStatus.message ?? "Crisp is already starting or recording."
+                )
+            }
             return AutomationResponse(
-                requestID: request.id, ok: true, status: model.automationStatus,
-                recording: Self.recording(folder: folder)
+                requestID: request.id,
+                result: .started(
+                    status: model.automationStatus,
+                    recording: Self.recording(folder: folder)
+                )
             )
 
         case .stop:
             guard model.isRecording else {
-                throw AutomationError.message("Crisp is not recording.")
+                throw CrispAutomationError.message(
+                    model.automationStatus.message ?? "Crisp is not recording."
+                )
             }
             guard let folder = await model.stopRecording() else {
-                throw AutomationError.message("The recording stopped without producing a playable master.")
+                throw CrispAutomationError.message(
+                    model.automationStatus.message
+                        ?? "The recording stopped without producing a playable master."
+                )
             }
             return AutomationResponse(
-                requestID: request.id, ok: true, status: model.automationStatus,
-                recording: Self.recording(folder: folder)
+                requestID: request.id,
+                result: .stopped(
+                    status: model.automationStatus,
+                    recording: Self.recording(folder: folder)
+                )
             )
         }
+    }
+
+    private enum AvailableTarget {
+        case display(SCDisplay)
+        case window(SCWindow)
+        case chromeTab(ChromeTab)
+    }
+
+    private struct AvailableItem {
+        var info: AutomationSource
+        var target: AvailableTarget
+    }
+
+    private struct SourceSnapshot {
+        var items: [AvailableItem]
+        var warnings: [String]
+    }
+
+    private func availableSources(includeChrome: Bool) async throws -> SourceSnapshot {
+        guard await AppModel.shared.awaitScreenAccess() else {
+            throw CrispAutomationError.message(
+                "Screen Recording permission is not active for this Crisp build. Open Crisp, grant access, and relaunch it."
+            )
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: true
+        )
+        let windows = Self.recordableWindows(content.windows)
+        var items = content.displays.map { display in
+            let name = Self.displayName(display)
+            return AvailableItem(
+                info: AutomationSource(
+                    id: "display:\(display.displayID)", kind: .display,
+                    label: "\(name) \(display.width)×\(display.height)",
+                    title: name, width: display.width, height: display.height
+                ),
+                target: .display(display)
+            )
+        }
+        items += windows.map { window in
+            let app = window.owningApplication?.applicationName ?? "App"
+            let title = window.title.flatMap { $0.isEmpty ? nil : $0 }
+            return AvailableItem(
+                info: AutomationSource(
+                    id: "window:\(window.windowID)", kind: .window,
+                    label: title.map { "\(app) — \($0)" } ?? app,
+                    app: app, title: title,
+                    width: Int(window.frame.width), height: Int(window.frame.height)
+                ),
+                target: .window(window)
+            )
+        }
+
+        var warnings: [String] = []
+        if includeChrome, ChromeBridge.isRunning {
+            do {
+                let tabs = try await ChromeBridge.listTabs()
+                items += tabs.map { tab in
+                    AvailableItem(
+                        info: AutomationSource(
+                            id: "chrome:\(tab.windowID):\(tab.tabID)", kind: .chromeTab,
+                            label: "Chrome — \(tab.displayTitle)", app: "Google Chrome",
+                            title: tab.displayTitle, url: tab.url,
+                            width: Int(tab.windowBounds.width), height: Int(tab.windowBounds.height)
+                        ),
+                        target: .chromeTab(tab)
+                    )
+                }
+            } catch {
+                warnings.append("Chrome tabs unavailable: \(error.localizedDescription)")
+            }
+        }
+        return SourceSnapshot(items: items, warnings: warnings)
+    }
+
+    private func captureSource(for item: AvailableItem) async throws -> CaptureSource {
+        switch item.target {
+        case .display(let display):
+            return .display(display)
+        case .window(let window):
+            return .window(window)
+        case .chromeTab(let tab):
+            let activated = try await ChromeBridge.activate(tab)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                true, onScreenWindowsOnly: true
+            )
+            guard let window = ChromeBridge.matchWindow(
+                title: activated.title,
+                bounds: activated.bounds,
+                in: Self.recordableWindows(content.windows)
+            ) else {
+                throw CrispAutomationError.message("The selected Chrome tab's window is no longer available.")
+            }
+            return .window(window)
+        }
+    }
+
+    private static func recordableWindows(_ windows: [SCWindow]) -> [SCWindow] {
+        windows.filter { window in
+            window.isOnScreen
+                && window.windowLayer == 0
+                && window.frame.width >= 120
+                && window.frame.height >= 90
+                && window.owningApplication?.bundleIdentifier != Bundle.main.bundleIdentifier
+        }.sorted {
+            ($0.owningApplication?.applicationName ?? "")
+                < ($1.owningApplication?.applicationName ?? "")
+        }
+    }
+
+    private static func displayName(_ display: SCDisplay) -> String {
+        let numberKey = NSDeviceDescriptionKey("NSScreenNumber")
+        if let screen = NSScreen.screens.first(where: {
+            ($0.deviceDescription[numberKey] as? NSNumber)?.uint32Value == display.displayID
+        }) {
+            return screen.localizedName
+        }
+        return CGDisplayIsMain(display.displayID) != 0 ? "Built-in Display" : "Display"
     }
 
     private static func recording(folder: URL) -> AutomationRecording {
@@ -119,198 +290,76 @@ final class AutomationServer {
         )
     }
 
-    enum AutomationError: LocalizedError {
-        case message(String)
-        var errorDescription: String? {
-            if case .message(let message) = self { return message }
-            return nil
+    private func requestFiles(in directory: URL) -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []).filter {
+            $0.lastPathComponent.hasPrefix("request-") && $0.pathExtension == "json"
         }
+    }
+
+    private func pruneOrphanResponses(in directory: URL) {
+        for url in (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? [] where url.lastPathComponent.hasPrefix("response-") && Self.isStale(url) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private static func requestID(from url: URL) -> String {
+        url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "request-", with: "")
+    }
+
+    private static func isStale(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate.map { abs($0.timeIntervalSinceNow) >= 120 } ?? true
+    }
+
+    private static func removeRequestAndResponse(id: String, bundleIdentifier: String) {
+        try? FileManager.default.removeItem(
+            at: CrispAutomation.requestURL(id: id, bundleIdentifier: bundleIdentifier)
+        )
+        try? FileManager.default.removeItem(
+            at: CrispAutomation.responseURL(id: id, bundleIdentifier: bundleIdentifier)
+        )
+    }
+
+    private static func processIsRunning(_ processID: Int32) -> Bool {
+        guard processID > 0 else { return false }
+        return kill(processID, 0) == 0 || errno == EPERM
     }
 }
 
 extension AppModel {
-    struct AutomationSourceSnapshot {
-        var sources: [AutomationSource]
-        var warnings: [String]
-    }
-
     var automationStatus: AutomationStatus {
         switch state {
-        case .idle:
-            return AutomationStatus(state: .idle)
         case .recording:
             return AutomationStatus(state: .recording, recordingFolder: currentFolder?.path)
         case .error(let message):
-            return AutomationStatus(state: .error, message: message, recordingFolder: currentFolder?.path)
-        }
-    }
-
-    func automationSources() async throws -> AutomationSourceSnapshot {
-        refresh()
-        for _ in 0..<100 where !accessChecked {
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
-        guard accessChecked, hasScreenAccess else {
-            throw AutomationServer.AutomationError.message(
-                "Screen Recording permission is not active for this Crisp build. Open Crisp, grant access, and relaunch it."
+            return AutomationStatus(
+                state: .error,
+                message: message,
+                recordingFolder: lastRecordingOutcome?.error == nil
+                    ? nil : lastRecordingOutcome?.folder?.path
             )
-        }
-        await refreshShareableContent()
-
-        var sources = displays.map { display in
-            let name = automationDisplayName(display)
-            return AutomationSource(
-                id: "display:\(display.displayID)", kind: .display,
-                label: "\(name) \(display.width)×\(display.height)",
-                title: name, width: display.width, height: display.height
-            )
-        }
-        sources += windows.map { window in
-            let app = window.owningApplication?.applicationName ?? "App"
-            let title = window.title.flatMap { $0.isEmpty ? nil : $0 }
-            return AutomationSource(
-                id: "window:\(window.windowID)", kind: .window,
-                label: title.map { "\(app) — \($0)" } ?? app,
-                app: app, title: title,
-                width: Int(window.frame.width), height: Int(window.frame.height)
-            )
-        }
-
-        var warnings: [String] = []
-        if ChromeBridge.isRunning {
-            do {
-                chromeTabs = try await ChromeBridge.listTabs()
-                sources += chromeTabs.map { tab in
-                    AutomationSource(
-                        id: "chrome:\(tab.windowID):\(tab.tabID)", kind: .chromeTab,
-                        label: "Chrome — \(tab.displayTitle)", app: "Google Chrome",
-                        title: tab.displayTitle, url: tab.url,
-                        width: Int(tab.windowBounds.width), height: Int(tab.windowBounds.height)
-                    )
-                }
-            } catch {
-                chromeTabs = []
-                warnings.append("Chrome tabs unavailable: \(error.localizedDescription)")
+        case .idle:
+            if let outcome = lastRecordingOutcome, let message = outcome.error {
+                return AutomationStatus(
+                    state: .error, message: message, recordingFolder: outcome.folder?.path
+                )
             }
-        }
-        return AutomationSourceSnapshot(sources: sources, warnings: warnings)
-    }
-
-    func automationStart(selector: AutomationSelector, codec rawCodec: String?) async throws -> URL {
-        guard !isRecording else {
-            throw AutomationServer.AutomationError.message("Crisp is already recording.")
-        }
-        let snapshot = try await automationSources()
-        let source = try automationResolve(selector, in: snapshot.sources)
-        if let rawCodec { codec = try automationCodec(rawCodec) }
-
-        switch source.kind {
-        case .display:
-            guard let id = source.id.split(separator: ":").last.flatMap({ CGDirectDisplayID($0) }),
-                  displays.contains(where: { $0.displayID == id }) else {
-                throw AutomationServer.AutomationError.message("That display is no longer available.")
-            }
-            sourceKind = .display
-            selectedDisplayID = id
-            selectedChromeTab = nil
-
-        case .window:
-            guard let id = source.id.split(separator: ":").last.flatMap({ CGWindowID($0) }),
-                  windows.contains(where: { $0.windowID == id }) else {
-                throw AutomationServer.AutomationError.message("That window is no longer available.")
-            }
-            sourceKind = .window
-            selectedWindowID = id
-            selectedChromeTab = nil
-
-        case .chromeTab:
-            let parts = source.id.split(separator: ":")
-            guard parts.count == 3, let windowID = Int(parts[1]), let tabID = Int(parts[2]),
-                  let tab = chromeTabs.first(where: { $0.windowID == windowID && $0.tabID == tabID }) else {
-                throw AutomationServer.AutomationError.message("That Chrome tab is no longer available.")
-            }
-            sourceKind = .window
-            selectedChromeTab = tab
-        }
-
-        guard let folder = await startRecording() else {
-            let message = automationStatus.message ?? "Crisp could not start recording."
-            throw AutomationServer.AutomationError.message(message)
-        }
-        return folder
-    }
-
-    private func automationResolve(
-        _ selector: AutomationSelector, in sources: [AutomationSource]
-    ) throws -> AutomationSource {
-        let candidates: [AutomationSource]
-        switch selector.kind {
-        case .source:
-            candidates = sources.filter { $0.id.caseInsensitiveCompare(selector.value) == .orderedSame }
-        case .chromeURL:
-            candidates = automationMatches(
-                sources.filter { $0.kind == .chromeTab }, value: selector.value,
-                fields: { [$0.url, $0.title, Optional($0.label)].compactMap { $0 } }
-            )
-        case .window:
-            candidates = automationMatches(
-                sources.filter { $0.kind == .window }, value: selector.value,
-                fields: { [$0.app, $0.title, Optional($0.label)].compactMap { $0 } }
-            )
-        case .display:
-            candidates = automationMatches(
-                sources.filter { $0.kind == .display }, value: selector.value,
-                fields: { [$0.title, Optional($0.label), Optional($0.id)].compactMap { $0 } }
-            )
-        }
-
-        guard !candidates.isEmpty else {
-            let warning = selector.kind == .chromeURL
-                ? " Run `crisp sources` and check any Chrome warning."
-                : " Run `crisp sources` to see current IDs."
-            throw AutomationServer.AutomationError.message("No source matched \"\(selector.value)\".\(warning)")
-        }
-        guard candidates.count == 1 else {
-            let choices = candidates.map { "\($0.id) (\($0.label))" }.joined(separator: ", ")
-            throw AutomationServer.AutomationError.message(
-                "Source selector \"\(selector.value)\" is ambiguous: \(choices). Use --source with an exact ID."
-            )
-        }
-        return candidates[0]
-    }
-
-    private func automationMatches(
-        _ sources: [AutomationSource], value: String,
-        fields: (AutomationSource) -> [String]
-    ) -> [AutomationSource] {
-        let exact = sources.filter { source in
-            fields(source).contains { $0.caseInsensitiveCompare(value) == .orderedSame }
-        }
-        if !exact.isEmpty { return exact }
-        return sources.filter { source in
-            fields(source).contains { $0.localizedCaseInsensitiveContains(value) }
+            return AutomationStatus(state: .idle)
         }
     }
+}
 
-    private func automationCodec(_ value: String) throws -> MasterCodec {
-        switch value.lowercased().replacingOccurrences(of: " ", with: "") {
-        case "hevc", "hevc10", "hevc10-bit": return .hevc10
-        case "prores422": return .proRes422
-        case "prores4444": return .proRes4444
-        default:
-            throw AutomationServer.AutomationError.message(
-                "Unknown codec \"\(value)\". Use hevc10, prores422, or prores4444."
-            )
+private extension MasterCodec {
+    init(_ codec: AutomationCodec) {
+        switch codec {
+        case .hevc10: self = .hevc10
+        case .proRes422: self = .proRes422
+        case .proRes4444: self = .proRes4444
         }
-    }
-
-    private func automationDisplayName(_ display: SCDisplay) -> String {
-        let numberKey = NSDeviceDescriptionKey("NSScreenNumber")
-        if let screen = NSScreen.screens.first(where: {
-            ($0.deviceDescription[numberKey] as? NSNumber)?.uint32Value == display.displayID
-        }) {
-            return screen.localizedName
-        }
-        return CGDisplayIsMain(display.displayID) != 0 ? "Built-in Display" : "Display"
     }
 }

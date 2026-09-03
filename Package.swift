@@ -30,5 +30,9 @@ let package = Package(
             dependencies: ["CrispAutomationProtocol"],
             path: "Sources/CrispMCP"
         ),
+        .testTarget(
+            name: "CrispAutomationProtocolTests",
+            dependencies: ["CrispAutomationProtocol"]
+        ),
     ]
 )

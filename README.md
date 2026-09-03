@@ -118,18 +118,18 @@ Then prompts such as “record a short demo of this local web app with Crisp”
 can trigger the skill automatically, or invoke it explicitly as
 `$crisp-recorder`.
 
-The control executable lives inside the app. Optionally expose the release app
-as `crisp` on your shell path:
+The control executable lives inside the app. Optionally expose it on your shell
+path under its canonical name:
 
 ```sh
-ln -s /Applications/Crisp.app/Contents/MacOS/crispctl ~/.local/bin/crisp
+ln -s /Applications/Crisp.app/Contents/MacOS/crispctl ~/.local/bin/crispctl
 ```
 
 ```sh
-crisp sources --json
-crisp start --chrome-url http://localhost:5173 --json
-crisp status --json
-crisp stop --json
+crispctl sources --json
+crispctl start --chrome-url http://localhost:5173 --json
+crispctl status --json
+crispctl stop --json
 ```
 
 `start` also accepts an exact ID from `sources` via `--source`, a native window

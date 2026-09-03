@@ -29,6 +29,11 @@ final class AppModel: ObservableObject {
         case error(String)
     }
 
+    struct RecordingOutcome {
+        var folder: URL?
+        var error: String?
+    }
+
     enum SourceKind: String, CaseIterable, Identifiable {
         case display = "Display"
         case window = "Window"
@@ -121,7 +126,9 @@ final class AppModel: ObservableObject {
     private var tracker: MouseTracker?
     private(set) var currentFolder: URL?
     private var currentSource: CaptureSource?
+    private var currentCodec: MasterCodec?
     private var startedAt: Date?
+    private(set) var lastRecordingOutcome: RecordingOutcome?
     /// `startRecording` suspends across the stream launch and `state` only
     /// flips once it succeeds; without this guard a second ⌘R in that
     /// window would start a second session over the first.
@@ -130,7 +137,7 @@ final class AppModel: ObservableObject {
     /// quit-time stop, or a stream error racing either) await it instead of
     /// tearing the same session down twice — and the quit path must not
     /// reply "terminate" until the master's moov atom is written.
-    private var stopTask: Task<Void, Never>?
+    private var stopTask: Task<RecordingOutcome, Never>?
     private var previewTask: Task<Void, Never>?
     private var accessCheckTask: Task<Void, Never>?
     private var activationObserver: (any NSObjectProtocol)?
@@ -156,6 +163,10 @@ final class AppModel: ObservableObject {
     func refresh() {
         reloadRecordings()
         observeActivation()
+        startAccessCheckIfNeeded()
+    }
+
+    private func startAccessCheckIfNeeded() {
         // onAppear can fire more than once; never stack probes — each
         // ScreenCaptureKit / CGRequestScreenCaptureAccess call can show the
         // system sheet again on macOS 15+ (Deny is not a stored TCC decision).
@@ -168,6 +179,12 @@ final class AppModel: ObservableObject {
                 startPreviewLoop()
             }
         }
+    }
+
+    func awaitScreenAccess() async -> Bool {
+        startAccessCheckIfNeeded()
+        await accessCheckTask?.value
+        return accessChecked && hasScreenAccess
     }
 
     /// Explicitly summon the system permission dialog (used by the card button).
@@ -527,36 +544,62 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func startRecording() async -> URL? {
-        guard !isStartingRecording, !isRecording else { return nil }
-        isStartingRecording = true
+        guard beginRecordingStart() else { return nil }
         defer { isStartingRecording = false }
         guard hasScreenAccess else {
-            state = .error("Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch.")
-            return nil
+            return failRecordingStart(
+                "Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch."
+            )
         }
         if sourceKind == .window, let tab = selectedChromeTab {
             // The user may have switched tabs since picking; show theirs again.
             do {
                 selectedWindowID = try await activateChromeTab(tab).windowID
             } catch {
-                state = .error(error.localizedDescription)
-                return nil
+                return failRecordingStart(error.localizedDescription)
             }
         }
         guard let source = buildSource() else {
             switch sourceKind {
-            case .display: state = .error("No display available to record.")
-            case .window: state = .error("Pick a window to record first.")
-            case .region: state = .error("Select a region first (choose a display, then “Select Region”).")
+            case .display: return failRecordingStart("No display available to record.")
+            case .window: return failRecordingStart("Pick a window to record first.")
+            case .region:
+                return failRecordingStart(
+                    "Select a region first (choose a display, then “Select Region”)."
+                )
             }
-            return nil
         }
+        return await startResolvedRecording(source: source, codec: codec)
+    }
+
+    @discardableResult
+    func startRecording(source: CaptureSource, codec: MasterCodec) async -> URL? {
+        guard beginRecordingStart() else { return nil }
+        defer { isStartingRecording = false }
+        guard hasScreenAccess else {
+            return failRecordingStart("Screen Recording permission is not active for this Crisp build.")
+        }
+        return await startResolvedRecording(source: source, codec: codec)
+    }
+
+    private func beginRecordingStart() -> Bool {
+        guard !isStartingRecording, !isRecording else { return false }
+        isStartingRecording = true
+        return true
+    }
+
+    private func failRecordingStart(_ message: String) -> URL? {
+        state = .error(message)
+        lastRecordingOutcome = RecordingOutcome(folder: nil, error: message)
+        return nil
+    }
+
+    private func startResolvedRecording(source: CaptureSource, codec: MasterCodec) async -> URL? {
         let folder: URL
         do {
             folder = try Recording.newFolder()
         } catch {
-            state = .error("Could not start recording: \(error.localizedDescription)")
-            return nil
+            return failRecordingStart("Could not start recording: \(error.localizedDescription)")
         }
         do {
             let engine = CaptureEngine()
@@ -594,7 +637,9 @@ final class AppModel: ObservableObject {
             self.tracker = tracker
             self.currentFolder = folder
             self.currentSource = source
+            self.currentCodec = codec
             self.startedAt = Date()
+            lastRecordingOutcome = nil
             state = .recording(start: Date())
 
             // Get out of the way of what's being recorded.
@@ -604,20 +649,20 @@ final class AppModel: ObservableObject {
             // Don't leave the freshly created folder (and any zero-frame
             // master.mov in it) as a dead entry in the library.
             try? FileManager.default.removeItem(at: folder)
-            state = .error("Could not start recording: \(error.localizedDescription)")
-            return nil
+            return failRecordingStart("Could not start recording: \(error.localizedDescription)")
         }
     }
 
     @discardableResult
     func stopRecording() async -> URL? {
-        let folder = currentFolder
+        let outcome: RecordingOutcome?
         if let stopTask {
-            await stopTask.value
-            return folder.flatMap { FileManager.default.fileExists(atPath: $0.appendingPathComponent("master.mov").path) ? $0 : nil }
+            outcome = await stopTask.value
+        } else {
+            outcome = await beginStop(streamError: nil)
         }
-        await beginStop(streamError: nil)
-        return folder.flatMap { FileManager.default.fileExists(atPath: $0.appendingPathComponent("master.mov").path) ? $0 : nil }
+        guard outcome?.error == nil else { return nil }
+        return outcome?.folder
     }
 
     /// The stream died out from under a recording (display unplugged, grant
@@ -628,32 +673,35 @@ final class AppModel: ObservableObject {
     private func salvageAfterStreamError(_ streamError: Error) async {
         guard stopTask == nil else { return }
         Self.log("stream error mid-recording: \(streamError.localizedDescription)")
-        await beginStop(streamError: streamError)
+        _ = await beginStop(streamError: streamError)
     }
 
     /// The one teardown envelope: guard the live session fields, run
     /// `finishRecording` inside the published `stopTask` (which concurrent
     /// stops and the quit path await), and clear it after.
-    private func beginStop(streamError: Error?) async {
+    private func beginStop(streamError: Error?) async -> RecordingOutcome? {
         guard let engine, let tracker, let folder = currentFolder,
-              let source = currentSource, let startedAt else { return }
+              let source = currentSource, let codec = currentCodec, let startedAt else { return nil }
         let task = Task {
             await finishRecording(engine: engine, tracker: tracker, folder: folder,
-                                  source: source, startedAt: startedAt, streamError: streamError)
+                                  source: source, codec: codec, startedAt: startedAt,
+                                  streamError: streamError)
         }
         stopTask = task
-        await task.value
+        let outcome = await task.value
         stopTask = nil
+        return outcome
     }
 
     /// Tear the active session down: stop the tracker, finalize the writer,
     /// and write the click log — used by Stop and by stream failure.
     private func finishRecording(
         engine: CaptureEngine, tracker: MouseTracker, folder: URL,
-        source: CaptureSource, startedAt: Date, streamError: Error?
-    ) async {
+        source: CaptureSource, codec: MasterCodec, startedAt: Date, streamError: Error?
+    ) async -> RecordingOutcome {
         tracker.stop()
         var failure: Error?
+        var outcomeFolder: URL? = folder
         do {
             try await engine.stop()
         } catch {
@@ -665,41 +713,45 @@ final class AppModel: ObservableObject {
             // Nothing playable was captured (zero frames, or the writer died
             // and its file was discarded): don't leave a dead folder behind.
             try? FileManager.default.removeItem(at: folder)
-            if let streamError {
-                state = .error("Recording stopped: \(streamError.localizedDescription)")
-            } else if failure as? CaptureEngine.CaptureError == .noFramesCaptured {
-                state = .error("Nothing was captured — the recording stopped before the first frame arrived.")
-            } else {
-                state = .error("Could not finish recording: \(failure.localizedDescription)")
-            }
+            outcomeFolder = nil
         } else {
             // Write the click log even when finalizing threw: the events are
             // valid in memory, and the master often is too.
             do {
                 try writeEvents(engine: engine, tracker: tracker, folder: folder,
-                                source: source, startedAt: startedAt)
+                                source: source, codec: codec, startedAt: startedAt)
             } catch {
                 if failure == nil { failure = error }
             }
             if let failure, streamError != nil {
                 Self.log("salvage after stream error also failed: \(failure.localizedDescription)")
             }
-            if let streamError {
-                state = .error("Recording stopped: \(streamError.localizedDescription)")
-            } else if let failure {
-                state = .error("Could not finish recording: \(failure.localizedDescription)")
-            } else {
-                state = .idle
-            }
         }
+
+        let message: String?
+        if let streamError {
+            message = "Recording stopped: \(streamError.localizedDescription)"
+        } else if failure as? CaptureEngine.CaptureError == .noFramesCaptured {
+            message = "Nothing was captured — the recording stopped before the first frame arrived."
+        } else if let failure {
+            message = "Could not finish recording: \(failure.localizedDescription)"
+        } else if outcomeFolder == nil {
+            message = "The recording stopped without producing a playable master."
+        } else {
+            message = nil
+        }
+        state = message.map(State.error) ?? .idle
+        let outcome = RecordingOutcome(folder: outcomeFolder, error: message)
+        lastRecordingOutcome = outcome
         cleanupAfterStop()
         reloadRecordings()
         NSApp.activate(ignoringOtherApps: true)
+        return outcome
     }
 
     private func writeEvents(
         engine: CaptureEngine, tracker: MouseTracker, folder: URL,
-        source: CaptureSource, startedAt: Date
+        source: CaptureSource, codec: MasterCodec, startedAt: Date
     ) throws {
         let meta = RecordingMeta(
             source: source.kindName,
@@ -728,6 +780,7 @@ final class AppModel: ObservableObject {
         tracker = nil
         currentFolder = nil
         currentSource = nil
+        currentCodec = nil
         startedAt = nil
     }
 

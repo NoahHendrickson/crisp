@@ -10,12 +10,12 @@ struct CrispMCP {
         "2024-11-05",
     ]
 
-    static func main() {
+    static func main() async {
         do {
-            let control = try ControlCommand(arguments: Array(CommandLine.arguments.dropFirst()))
+            let control = try MCPControl(arguments: Array(CommandLine.arguments.dropFirst()))
             let server = Server(control: control)
             while let line = readLine() {
-                server.receive(line)
+                await server.receive(line)
             }
         } catch {
             FileHandle.standardError.write(Data("crisp-mcp: \(error.localizedDescription)\n".utf8))
@@ -25,13 +25,13 @@ struct CrispMCP {
 }
 
 private final class Server {
-    private let control: ControlCommand
+    private let control: MCPControl
 
-    init(control: ControlCommand) {
+    init(control: MCPControl) {
         self.control = control
     }
 
-    func receive(_ line: String) {
+    func receive(_ line: String) async {
         guard let data = line.data(using: .utf8) else { return }
         do {
             let message = try JSONSerialization.jsonObject(with: data)
@@ -40,9 +40,12 @@ private final class Server {
                     write(protocolError(id: NSNull(), code: -32600, message: "Invalid Request"))
                     return
                 }
-                let responses = batch.compactMap(handle)
+                var responses: [[String: Any]] = []
+                for item in batch {
+                    if let response = await handle(item) { responses.append(response) }
+                }
                 if !responses.isEmpty { write(responses) }
-            } else if let response = handle(message) {
+            } else if let response = await handle(message) {
                 write(response)
             }
         } catch {
@@ -50,7 +53,7 @@ private final class Server {
         }
     }
 
-    private func handle(_ message: Any) -> [String: Any]? {
+    private func handle(_ message: Any) async -> [String: Any]? {
         guard let request = message as? [String: Any], request["jsonrpc"] as? String == "2.0",
               let method = request["method"] as? String else {
             return protocolError(id: NSNull(), code: -32600, message: "Invalid Request")
@@ -102,8 +105,8 @@ private final class Server {
             }
             let result: [String: Any]
             do {
-                let response = try control.call(tool: name, arguments: arguments)
-                result = toolResult(response: response, isError: !response.ok)
+                let response = try await control.call(tool: name, arguments: arguments)
+                result = toolResult(response: response, isError: !response.isSuccess)
             } catch {
                 result = toolError(error.localizedDescription)
             }
@@ -199,7 +202,7 @@ private final class Server {
 
     private func toolResult(response: AutomationResponse, isError: Bool) -> [String: Any] {
         let object = (try? encodeObject(response)) ?? [:]
-        let text = (try? prettyJSON(object)) ?? (response.error ?? "Crisp returned an unreadable response.")
+        let text = (try? prettyJSON(object)) ?? "Crisp returned an unreadable response."
         return [
             "content": [["type": "text", "text": text]],
             "structuredContent": object,
@@ -219,7 +222,7 @@ private final class Server {
     private func encodeObject<T: Encodable>(_ value: T) throws -> [String: Any] {
         let data = try JSONEncoder().encode(value)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MCPError.message("Could not encode Crisp's response.")
+            throw CrispAutomationError.message("Could not encode Crisp's response.")
         }
         return object
     }
@@ -249,135 +252,78 @@ private final class Server {
     }
 }
 
-private struct ControlCommand {
-    let executable: URL
-    let app: URL?
+private struct MCPControl {
+    let client: CrispAutomationClient
 
     init(arguments: [String]) throws {
         var args = arguments
         if args.contains("--help") || args.contains("-h") {
-            print("usage: crisp-mcp [--crispctl /path/to/crispctl] [--app /path/to/Crisp.app]")
+            print("usage: crisp-mcp [--app /path/to/Crisp.app]")
             exit(0)
         }
 
         func take(_ option: String) throws -> String? {
             guard let index = args.firstIndex(of: option) else { return nil }
-            guard index + 1 < args.count else { throw MCPError.message("\(option) requires a value.") }
+            guard index + 1 < args.count else {
+                throw CrispAutomationError.message("\(option) requires a value.")
+            }
             let value = args[index + 1]
             args.removeSubrange(index...(index + 1))
             return value
         }
 
-        let explicitControl = try take("--crispctl")
         let explicitApp = try take("--app")
-        guard args.isEmpty else { throw MCPError.message("Unexpected argument: \(args[0])") }
-
-        if let explicitControl {
-            executable = URL(fileURLWithPath: explicitControl).standardizedFileURL
-        } else {
-            executable = Self.siblingControlExecutable()
+        guard args.isEmpty else {
+            throw CrispAutomationError.message("Unexpected argument: \(args[0])")
         }
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw MCPError.message("crispctl is not executable at \(executable.path).")
-        }
-
-        if let explicitApp {
-            let url = URL(fileURLWithPath: explicitApp).standardizedFileURL
-            guard url.pathExtension == "app", FileManager.default.fileExists(atPath: url.path) else {
-                throw MCPError.message("No app exists at \(url.path).")
-            }
-            app = url
-        } else {
-            app = nil
-        }
+        client = try CrispAutomationClient(appPath: explicitApp)
     }
 
-    func call(tool: String, arguments: [String: Any]) throws -> AutomationResponse {
-        var command: [String]
+    func call(tool: String, arguments: [String: Any]) async throws -> AutomationResponse {
+        let command: AutomationCommand
         switch tool {
         case "list_sources":
             try requireEmpty(arguments)
-            command = ["sources"]
+            command = .sources
         case "get_recording_status":
             try requireEmpty(arguments)
-            command = ["status"]
+            command = .status
         case "stop_recording":
             try requireEmpty(arguments)
-            command = ["stop"]
+            command = .stop
         case "start_recording":
-            command = ["start"]
             let selectors = [
-                ("source_id", "--source"),
-                ("chrome_url", "--chrome-url"),
-                ("window", "--window"),
-                ("display", "--display"),
-            ].compactMap { key, option -> (String, String)? in
+                ("source_id", AutomationSelector.Kind.source),
+                ("chrome_url", AutomationSelector.Kind.chromeURL),
+                ("window", AutomationSelector.Kind.window),
+                ("display", AutomationSelector.Kind.display),
+            ].compactMap { key, kind -> AutomationSelector? in
                 guard let value = arguments[key] as? String, !value.isEmpty else { return nil }
-                return (option, value)
+                return AutomationSelector(kind: kind, value: value)
             }
             guard selectors.count == 1 else {
-                throw MCPError.message("start_recording requires exactly one of source_id, chrome_url, window, or display.")
+                throw CrispAutomationError.message(
+                    "start_recording requires exactly one of source_id, chrome_url, window, or display."
+                )
             }
-            command += [selectors[0].0, selectors[0].1]
-            if let codec = arguments["codec"] as? String {
-                guard ["hevc10", "prores422", "prores4444"].contains(codec) else {
-                    throw MCPError.message("codec must be hevc10, prores422, or prores4444.")
-                }
-                command += ["--codec", codec]
-            }
+            let codec = try (arguments["codec"] as? String).map(AutomationCodec.init(argument:))
             let allowed = Set(["source_id", "chrome_url", "window", "display", "codec"])
             let extras = Set(arguments.keys).subtracting(allowed)
             guard extras.isEmpty else {
-                throw MCPError.message("Unexpected start_recording argument: \(extras.sorted()[0])")
+                throw CrispAutomationError.message(
+                    "Unexpected start_recording argument: \(extras.sorted()[0])"
+                )
             }
+            command = .start(selector: selectors[0], codec: codec)
         default:
-            throw MCPError.message("Unknown tool: \(tool)")
+            throw CrispAutomationError.message("Unknown tool: \(tool)")
         }
-
-        command.append("--json")
-        if let app { command += ["--app", app.path] }
-        return try run(command)
+        return try await client.send(AutomationRequest(command: command))
     }
 
     private func requireEmpty(_ arguments: [String: Any]) throws {
         guard arguments.isEmpty else {
-            throw MCPError.message("This tool does not accept arguments.")
+            throw CrispAutomationError.message("This tool does not accept arguments.")
         }
-    }
-
-    private func run(_ arguments: [String]) throws -> AutomationResponse {
-        let process = Process()
-        let output = Pipe()
-        let errors = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = errors
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        if let response = try? JSONDecoder().decode(AutomationResponse.self, from: data) {
-            return response
-        }
-        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
-        let detail = String(decoding: errorData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        throw MCPError.message(detail.isEmpty
-            ? "crispctl exited with status \(process.terminationStatus) without a JSON response."
-            : detail)
-    }
-
-    private static func siblingControlExecutable() -> URL {
-        let raw = CommandLine.arguments[0]
-        let server = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
-        return server.deletingLastPathComponent().appendingPathComponent("crispctl")
-    }
-}
-
-private enum MCPError: LocalizedError {
-    case message(String)
-
-    var errorDescription: String? {
-        if case .message(let message) = self { return message }
-        return nil
     }
 }

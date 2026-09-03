@@ -37,7 +37,7 @@ CLI fallback in detail.
    when needed, open the requested route, wait for it to settle, and size the
    target window appropriately. For a URL, prefer a visible Google Chrome tab
    because Crisp can select Chrome tabs by title and host.
-3. Find the CLI in this order: `crisp` on `PATH`,
+3. Find the CLI in this order: `crispctl` on `PATH`,
    `/Applications/Crisp.app/Contents/MacOS/crispctl`, then the current repo's
    `build/Crisp Dev.app/Contents/MacOS/crispctl`. Use the same executable for
    every command in the session. The command launches its containing app.
@@ -46,18 +46,18 @@ CLI fallback in detail.
 
 ## Select and start with the CLI fallback
 
-Run `crisp sources --json` (substitute the resolved executable when it is not
+Run `crispctl sources --json` (substitute the resolved executable when it is not
 on `PATH`). Choose the exact `id` when possible, then start with:
 
 ```sh
-crisp start --source 'chrome:WINDOW_ID:TAB_ID' --json
+crispctl start --source 'chrome:WINDOW_ID:TAB_ID' --json
 ```
 
 Convenience selectors are available when they match exactly one source:
 
-- Website or Chrome tab: `crisp start --chrome-url 'URL-or-unique-text' --json`
-- Native app: `crisp start --window 'app-or-title' --json`
-- Display: `crisp start --display 'name-or-ID' --json`
+- Website or Chrome tab: `crispctl start --chrome-url 'URL-or-unique-text' --json`
+- Native app: `crispctl start --window 'app-or-title' --json`
+- Display: `crispctl start --display 'name-or-ID' --json`
 
 Use `--source` if a convenience selector reports ambiguity. Add
 `--codec hevc10|prores422|prores4444` only when requested. Region selection is
@@ -77,11 +77,11 @@ allow Crisp to control Google Chrome under **Privacy & Security > Automation**.
 2. Perform only the requested demonstration in the chosen target. Keep actions
    deliberate and avoid exposing unrelated notifications, credentials, or
    private tabs.
-3. Run `crisp stop --json`. Do not quit Crisp or use process signals. A
+3. Run `crispctl stop --json`. Do not quit Crisp or use process signals. A
    successful response must report `idle` and return `master` and `events`
    paths after finalization.
 4. Confirm both files exist and `master.mov` is non-empty. Use
-   `crisp status --json` for diagnosis; never issue a second start while status
+   `crispctl status --json` for diagnosis; never issue a second start while status
    is `recording`.
 
 ## Deliver
