@@ -30,6 +30,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/Crisp "$APP/Contents/MacOS/Crisp"
+cp .build/release/crispctl "$APP/Contents/MacOS/crispctl"
 # SwiftPM resource bundle (fonts, icons) — Bundle.module looks in Contents/Resources.
 cp -R .build/release/Crisp_Crisp.bundle "$APP/Contents/Resources/"
 if [[ -f "$ICON" ]]; then
@@ -75,9 +76,11 @@ PLIST
 IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development|Developer ID Application|Crisp Dev Signing/ {print $2; exit}')
 if [[ -n "$IDENTITY" ]]; then
     echo "Signing with: $IDENTITY"
+    codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/crispctl"
     codesign --force --options runtime --entitlements assets/Crisp.entitlements --sign "$IDENTITY" "$APP"
 else
     echo "Signing ad-hoc (no identity found — permission re-grant needed after each rebuild)"
+    codesign --force --sign - "$APP/Contents/MacOS/crispctl"
     codesign --force --entitlements assets/Crisp.entitlements --sign - "$APP"
 fi
 

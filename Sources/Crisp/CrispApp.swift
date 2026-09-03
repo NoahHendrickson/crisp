@@ -40,6 +40,7 @@ struct CrispApp: App {
 
     init() {
         Theme.registerFonts()
+        AutomationServer.shared.start()
         // When run as a bare executable (swift run), behave like a regular app.
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)

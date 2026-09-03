@@ -5,9 +5,9 @@ description: Record a project demo, application window, browser tab, website, or
 
 # Crisp Recorder
 
-Use Crisp through native-app computer control. Crisp has no external command
-for starting or stopping a capture; its `--agent-tool` interface only inspects
-an existing recording for the AI editor.
+Use Crisp's bundled local control CLI for capture and computer control only for
+the demonstration inside the target. The CLI talks to the signed Crisp app, so
+Screen Recording permission and clean movie finalization stay with the app.
 
 ## Prepare
 
@@ -18,24 +18,32 @@ an existing recording for the AI editor.
    when needed, open the requested route, wait for it to settle, and size the
    target window appropriately. For a URL, prefer a visible Google Chrome tab
    because Crisp can select Chrome tabs by title and host.
-3. Find an existing `Crisp` release app first. Fall back to `Crisp Dev`
-   (`com.noey.crisp.dev`) or the current repo's `build/Crisp Dev.app`. Remember
-   the exact build selected and use that same build for stopping.
+3. Find the CLI in this order: `crisp` on `PATH`,
+   `/Applications/Crisp.app/Contents/MacOS/crispctl`, then the current repo's
+   `build/Crisp Dev.app/Contents/MacOS/crispctl`. Use the same executable for
+   every command in the session. The command launches its containing app.
 4. Note the existing folders under `~/Movies/Crisp/` so the new artifact can be
    identified without relying only on its timestamp.
 
-## Select the source
+## Select and start
 
-Open or activate Crisp and use accessibility labels rather than coordinates
-whenever possible.
+Run `crisp sources --json` (substitute the resolved executable when it is not
+on `PATH`). Choose the exact `id` when possible, then start with:
 
-- Website or Chrome tab: choose **Window**, open **Select a window**, switch to
-  **Chrome Tabs**, then choose the entry matching both the page title and host.
-- Native project/app: choose **Window**, open **Select a window**, stay on
-  **App Windows**, then choose the matching app and window title.
-- Whole desktop: choose **Display** and the intended display.
-- Region: choose **Region** only when the user requested a crop or a suitable
-  window target is unavailable; region selection requires a visual drag.
+```sh
+crisp start --source 'chrome:WINDOW_ID:TAB_ID' --json
+```
+
+Convenience selectors are available when they match exactly one source:
+
+- Website or Chrome tab: `crisp start --chrome-url 'URL-or-unique-text' --json`
+- Native app: `crisp start --window 'app-or-title' --json`
+- Display: `crisp start --display 'name-or-ID' --json`
+
+Use `--source` if a convenience selector reports ambiguity. Add
+`--codec hevc10|prores422|prores4444` only when requested. Region selection is
+GUI-only; use the accessible **Region** flow when the user specifically needs a
+crop.
 
 If Crisp shows its Screen Recording permission card, stop and tell the user
 that the selected Crisp build needs access in **System Settings > Privacy &
@@ -43,20 +51,19 @@ Security > Screen & System Audio Recording** and then a relaunch. Do not repeat
 permission probes. Chrome-tab selection may separately require the user to
 allow Crisp to control Google Chrome under **Privacy & Security > Automation**.
 
-## Record
+## Demonstrate and stop
 
-1. Click **Record** and verify that Crisp hides itself and that no error is
-   shown. If the app stays visible, inspect its state before interacting with
-   the target.
+1. Require a successful start response whose status is `recording`; retain the
+   returned folder path.
 2. Perform only the requested demonstration in the chosen target. Keep actions
    deliberate and avoid exposing unrelated notifications, credentials, or
    private tabs.
-3. To stop, reactivate the exact Crisp build (for example with macOS `open`),
-   then use **Stop Recording** or the app-local `Command-R` shortcut. Never
-   terminate the app while capture finalization is in flight.
-4. Verify that Crisp returns to its idle **Record** state. Identify the newly
-   created folder and confirm that both `master.mov` and `events.json` exist
-   and that `master.mov` is non-empty.
+3. Run `crisp stop --json`. Do not quit Crisp or use process signals. A
+   successful response must report `idle` and return `master` and `events`
+   paths after finalization.
+4. Confirm both files exist and `master.mov` is non-empty. Use
+   `crisp status --json` for diagnosis; never issue a second start while status
+   is `recording`.
 
 ## Deliver
 
@@ -69,3 +76,8 @@ If the user explicitly requests Crisp's animated zooms or a polished export,
 open the new recording in Crisp's editor and use **Export with zooms** after
 the capture is verified. Preserve the master; Crisp writes numbered exports
 without overwriting earlier ones.
+
+If the bundled CLI is unavailable because the installed app predates it, fall
+back to Crisp's accessible GUI controls for selecting the source and starting
+and stopping. Explain that the app should be updated before promising
+deterministic CLI control.

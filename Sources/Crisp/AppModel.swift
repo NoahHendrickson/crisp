@@ -119,7 +119,7 @@ final class AppModel: ObservableObject {
 
     private var engine: CaptureEngine?
     private var tracker: MouseTracker?
-    private var currentFolder: URL?
+    private(set) var currentFolder: URL?
     private var currentSource: CaptureSource?
     private var startedAt: Date?
     /// `startRecording` suspends across the stream launch and `state` only
@@ -525,13 +525,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func startRecording() async {
-        guard !isStartingRecording, !isRecording else { return }
+    @discardableResult
+    func startRecording() async -> URL? {
+        guard !isStartingRecording, !isRecording else { return nil }
         isStartingRecording = true
         defer { isStartingRecording = false }
         guard hasScreenAccess else {
             state = .error("Screen Recording permission is not active for this build. Use the Grant Access button, approve in System Settings, then Relaunch.")
-            return
+            return nil
         }
         if sourceKind == .window, let tab = selectedChromeTab {
             // The user may have switched tabs since picking; show theirs again.
@@ -539,7 +540,7 @@ final class AppModel: ObservableObject {
                 selectedWindowID = try await activateChromeTab(tab).windowID
             } catch {
                 state = .error(error.localizedDescription)
-                return
+                return nil
             }
         }
         guard let source = buildSource() else {
@@ -548,14 +549,14 @@ final class AppModel: ObservableObject {
             case .window: state = .error("Pick a window to record first.")
             case .region: state = .error("Select a region first (choose a display, then “Select Region”).")
             }
-            return
+            return nil
         }
         let folder: URL
         do {
             folder = try Recording.newFolder()
         } catch {
             state = .error("Could not start recording: \(error.localizedDescription)")
-            return
+            return nil
         }
         do {
             let engine = CaptureEngine()
@@ -598,20 +599,25 @@ final class AppModel: ObservableObject {
 
             // Get out of the way of what's being recorded.
             NSApp.hide(nil)
+            return folder
         } catch {
             // Don't leave the freshly created folder (and any zero-frame
             // master.mov in it) as a dead entry in the library.
             try? FileManager.default.removeItem(at: folder)
             state = .error("Could not start recording: \(error.localizedDescription)")
+            return nil
         }
     }
 
-    func stopRecording() async {
+    @discardableResult
+    func stopRecording() async -> URL? {
+        let folder = currentFolder
         if let stopTask {
             await stopTask.value
-            return
+            return folder.flatMap { FileManager.default.fileExists(atPath: $0.appendingPathComponent("master.mov").path) ? $0 : nil }
         }
         await beginStop(streamError: nil)
+        return folder.flatMap { FileManager.default.fileExists(atPath: $0.appendingPathComponent("master.mov").path) ? $0 : nil }
     }
 
     /// The stream died out from under a recording (display unplugged, grant

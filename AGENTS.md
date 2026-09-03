@@ -21,14 +21,15 @@ polished videos with animated zooms.
 
 - Screen Recording permission belongs to the exact app identity. Do not loop
   permission probes or repeatedly relaunch after a denial.
-- Crisp hides itself after recording starts. Reactivate the same app build
-  before using its app-local `Command-R` shortcut or the Stop Recording button.
+- Crisp hides itself after recording starts. Prefer the bundled `crispctl stop`
+  command, which reaches the hidden app and waits for finalization. When using
+  the GUI, reactivate the same app build before its Stop Recording button.
 - Always stop a live recording cleanly. Quitting invokes asynchronous
   finalization so `master.mov` receives its movie metadata.
 - Chrome-tab capture activates the requested tab and records its whole Chrome
   window. Other app targets use the App Windows picker.
-- `--agent-tool` is for inspecting and editing an existing recording. It does
-  not start, stop, or select a new capture.
+- The bundled `crispctl` executable is the capture control API. `--agent-tool`
+  is a separate interface for inspecting and editing an existing recording.
 
 ## Agent-made demos
 

@@ -71,9 +71,10 @@ from display/region shots.
 
 ## Using Crisp with coding agents
 
-Crisp's capture controls have accessibility labels, so a computer-use agent
-can select an app window or Chrome tab, start a recording, demonstrate a
-project, reactivate Crisp, and stop cleanly. The reusable workflow is in
+Crisp bundles a local `crispctl` command that lists recordable sources, starts
+and stops capture through the signed app, reports status, and returns artifact
+paths as JSON. An agent uses computer control only for the demonstration inside
+the selected app or browser. The reusable workflow is in
 [`agent-skills/crisp-recorder`](agent-skills/crisp-recorder/SKILL.md).
 
 To make it available to Codex and ChatGPT from every project on this Mac:
@@ -85,8 +86,28 @@ ln -s "$(pwd)/agent-skills/crisp-recorder" ~/.agents/skills/crisp-recorder
 
 Then prompts such as “record a short demo of this local web app with Crisp”
 can trigger the skill automatically, or invoke it explicitly as
-`$crisp-recorder`. This is a computer-use workflow, not a capture CLI: Crisp's
-existing `--agent-tool` commands operate on recordings after capture.
+`$crisp-recorder`.
+
+The control executable lives inside the app. Optionally expose the release app
+as `crisp` on your shell path:
+
+```sh
+ln -s /Applications/Crisp.app/Contents/MacOS/crispctl ~/.local/bin/crisp
+```
+
+```sh
+crisp sources --json
+crisp start --chrome-url http://localhost:5173 --json
+crisp status --json
+crisp stop --json
+```
+
+`start` also accepts an exact ID from `sources` via `--source`, a native window
+via `--window`, or a display via `--display`. Add `--codec hevc10`,
+`prores422`, or `prores4444` when the default is not appropriate. The CLI
+launches the app if needed and communicates only through per-user files and
+macOS distributed notifications; capture remains inside the signed app process
+that owns Screen Recording permission.
 
 ## Installing
 
