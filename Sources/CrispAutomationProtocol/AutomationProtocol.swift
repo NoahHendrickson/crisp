@@ -24,6 +24,14 @@ public enum CrispAutomation {
     public static func readyURL(bundleIdentifier: String) -> URL {
         directory(bundleIdentifier: bundleIdentifier).appendingPathComponent("ready")
     }
+
+    /// Process id written to `ready` by the instance that answers automation.
+    public static func readyProcessID(bundleIdentifier: String) -> Int32? {
+        guard let data = try? Data(contentsOf: readyURL(bundleIdentifier: bundleIdentifier)) else {
+            return nil
+        }
+        return Int32(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
 }
 
 public enum CrispAutomationError: LocalizedError {
@@ -380,6 +388,10 @@ public struct CrispAutomationClient {
         )
     }
 
+    /// Notification id that carries no request: it only asks a running Crisp
+    /// to take over automation when the instance named in `ready` has quit.
+    public static let readyProbeID = "ready-probe"
+
     private func ensureAppIsReady() async throws {
         var running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
         if running.isEmpty {
@@ -396,14 +408,27 @@ public struct CrispAutomationClient {
         }
 
         let deadline = Date().addingTimeInterval(10)
-        let readyURL = CrispAutomation.readyURL(bundleIdentifier: bundleIdentifier)
+        var nextProbe = Date.distantPast
         while Date() < deadline {
             try Task.checkCancellation()
             running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-            if let pid = running.first?.processIdentifier,
-               let data = try? Data(contentsOf: readyURL),
-               String(decoding: data, as: UTF8.self) == String(pid) {
+            // Several copies of one build can run at once (an installed app
+            // beside a fresh `build/` one); `ready` names the instance that
+            // answers, and any running copy may be it.
+            if let owner = CrispAutomation.readyProcessID(bundleIdentifier: bundleIdentifier),
+               running.contains(where: { $0.processIdentifier == owner }) {
                 return
+            }
+            if !running.isEmpty, Date() >= nextProbe {
+                // The named instance quit while another copy kept running:
+                // a probe lets the survivor take over.
+                DistributedNotificationCenter.default().postNotificationName(
+                    CrispAutomation.notification,
+                    object: bundleIdentifier,
+                    userInfo: ["id": Self.readyProbeID],
+                    deliverImmediately: true
+                )
+                nextProbe = Date().addingTimeInterval(0.5)
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }

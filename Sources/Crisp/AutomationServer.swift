@@ -35,10 +35,9 @@ final class AutomationServer {
             }
         }
 
-        let pid = String(ProcessInfo.processInfo.processIdentifier)
-        try? Data(pid.utf8).write(
-            to: CrispAutomation.readyURL(bundleIdentifier: bundleIdentifier), options: .atomic
-        )
+        if !claimAutomation(bundleIdentifier: bundleIdentifier) {
+            AppModel.log("automation: another running \(bundleIdentifier) answers requests")
+        }
         pruneOrphanResponses(in: directory)
         for url in requestFiles(in: directory) {
             let id = Self.requestID(from: url)
@@ -52,11 +51,30 @@ final class AutomationServer {
         AppModel.log("automation: ready for \(bundleIdentifier)")
     }
 
+    /// Several copies of one build can run at once (an installed app beside a
+    /// fresh `build/` one). The `ready` file names the instance that answers
+    /// automation; the others stay quiet until that instance is gone.
+    private func claimAutomation(bundleIdentifier: String) -> Bool {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        if let owner = CrispAutomation.readyProcessID(bundleIdentifier: bundleIdentifier) {
+            if owner == ownPID { return true }
+            if NSRunningApplication(processIdentifier: owner)?.bundleIdentifier == bundleIdentifier {
+                return false
+            }
+        }
+        try? Data(String(ownPID).utf8).write(
+            to: CrispAutomation.readyURL(bundleIdentifier: bundleIdentifier), options: .atomic
+        )
+        return true
+    }
+
     private func handle(id: String, bundleIdentifier: String, allowStart: Bool) async {
-        guard !handling.contains(id) else { return }
+        guard claimAutomation(bundleIdentifier: bundleIdentifier) else { return }
+        guard id != CrispAutomationClient.readyProbeID, !handling.contains(id) else { return }
         let requestURL = CrispAutomation.requestURL(id: id, bundleIdentifier: bundleIdentifier)
         let responseURL = CrispAutomation.responseURL(id: id, bundleIdentifier: bundleIdentifier)
-        guard !FileManager.default.fileExists(atPath: responseURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: requestURL.path),
+              !FileManager.default.fileExists(atPath: responseURL.path) else { return }
         handling.insert(id)
         defer { handling.remove(id) }
 
