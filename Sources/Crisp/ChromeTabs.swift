@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ApplicationServices
 import ScreenCaptureKit
 
 /// One open tab in Google Chrome, as reported over Apple Events.
@@ -253,5 +254,110 @@ enum ChromeBridge {
         case -600: return .notRunning      // procNotFound
         default: return .script(message)
         }
+    }
+}
+
+// MARK: - Page area
+
+/// Where a Chrome window shows its page. ScreenCaptureKit records whole
+/// windows, so a "tab" recording crops to the active tab's web area, found in
+/// Chrome's accessibility tree. That needs the Accessibility grant (a
+/// separate one from Screen Recording and Automation); without it the whole
+/// window, tab strip and toolbar included, is recorded.
+extension ChromeBridge {
+    static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    )!
+
+    /// `prompt` shows the system's one-time "Crisp would like to control this
+    /// computer using accessibility features" dialog.
+    static func hasAccessibilityAccess(prompt: Bool = false) -> Bool {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        return AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
+    }
+
+    /// Smallest page area worth cropping to; anything less means the probe
+    /// hit a bubble or a collapsed pane rather than the page.
+    private static let minimumPageSize = CGSize(width: 120, height: 90)
+
+    /// The page area of `window`, local to its top-left corner in points, or
+    /// nil when the whole window should be recorded: no Accessibility access,
+    /// Chrome exposing no page there, or a page that already fills the window.
+    static func pageCrop(in window: SCWindow) async -> CGRect? {
+        guard hasAccessibilityAccess(), let pid = window.owningApplication?.processID else { return nil }
+        let frame = window.frame
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 2)
+                // Chrome builds its accessibility tree lazily; this Chrome-
+                // specific attribute asks for it without a screen reader.
+                AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+                var crop: CGRect?
+                for attempt in 0..<3 {
+                    if attempt > 0 { Thread.sleep(forTimeInterval: 0.15) }
+                    if let area = webAreaFrame(app: app, windowFrame: frame) {
+                        crop = localCrop(of: area, in: frame)
+                        break
+                    }
+                }
+                continuation.resume(returning: crop)
+            }
+        }
+    }
+
+    /// Screen frame of the outermost AXWebArea under a point well inside the
+    /// page (below the toolbar and any bookmarks bar). Iframes nest their own
+    /// web areas, so keep climbing to the top and remember the last one.
+    private static func webAreaFrame(app: AXUIElement, windowFrame: CGRect) -> CGRect? {
+        let probe = CGPoint(x: windowFrame.midX, y: windowFrame.minY + windowFrame.height * 0.6)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(app, Float(probe.x), Float(probe.y), &hit) == .success,
+              var element = hit else { return nil }
+        var outermost: CGRect?
+        for _ in 0..<64 {
+            if axString(element, kAXRoleAttribute) == "AXWebArea", let frame = axFrame(element) {
+                outermost = frame
+            }
+            guard let parent = axElement(element, kAXParentAttribute) else { break }
+            element = parent
+        }
+        return outermost
+    }
+
+    private static func localCrop(of area: CGRect, in frame: CGRect) -> CGRect? {
+        let local = area.offsetBy(dx: -frame.minX, dy: -frame.minY)
+            .intersection(CGRect(origin: .zero, size: frame.size))
+            .integral
+        guard local.width >= minimumPageSize.width, local.height >= minimumPageSize.height,
+              local.width * local.height < frame.width * frame.height - 1 else { return nil }
+        return local
+    }
+
+    private static func axValue(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private static func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+        axValue(element, attribute) as? String
+    }
+
+    private static func axElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        guard let value = axValue(element, attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    /// Screen-space frame (points, top-left origin) of an element.
+    private static func axFrame(_ element: AXUIElement) -> CGRect? {
+        guard let position = axValue(element, kAXPositionAttribute),
+              let size = axValue(element, kAXSizeAttribute),
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 }

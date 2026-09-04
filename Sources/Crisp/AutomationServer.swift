@@ -253,6 +253,11 @@ final class AutomationServer {
             } catch {
                 warnings.append("Chrome tabs unavailable: \(error.localizedDescription)")
             }
+            if !ChromeBridge.hasAccessibilityAccess() {
+                warnings.append(
+                    "Chrome tab sources record the whole Chrome window, tab strip and toolbar included, until Crisp is allowed under System Settings > Privacy & Security > Accessibility; then they crop to the page."
+                )
+            }
         }
         return SourceSnapshot(items: items, warnings: warnings)
     }
@@ -262,7 +267,7 @@ final class AutomationServer {
         case .display(let display):
             return .display(display)
         case .window(let window):
-            return .window(window)
+            return .window(window, crop: nil)
         case .chromeTab(let tab):
             let activated = try await ChromeBridge.activate(tab)
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -276,7 +281,7 @@ final class AutomationServer {
             ) else {
                 throw CrispAutomationError.message("The selected Chrome tab's window is no longer available.")
             }
-            return .window(window)
+            return .window(window, crop: await AppModel.pageCrop(in: window))
         }
     }
 

@@ -6,11 +6,12 @@ import CoreMedia
 
 /// Captures one display with ScreenCaptureKit and writes a high-quality master file
 /// via AVAssetWriter. Cursor is NOT captured — it is re-rendered at export time.
-/// What to capture: a whole display, a single window, or a region of a display.
-/// Region rects are in points, top-left origin, local to the display.
+/// What to capture: a whole display, a single window (optionally cropped to
+/// a rect local to its top-left corner, e.g. a Chrome tab's page area), or a
+/// region of a display. Rects are in points, top-left origin.
 enum CaptureSource {
     case display(SCDisplay)
-    case window(SCWindow)
+    case window(SCWindow, crop: CGRect?)
     case region(SCDisplay, CGRect)
 
     var kindName: String {
@@ -80,11 +81,20 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
             sizePoints = rect.size
             let displayOrigin = CGDisplayBounds(display.displayID).origin
             captureOriginQuartz = CGPoint(x: displayOrigin.x + rect.minX, y: displayOrigin.y + rect.minY)
-        case .window(let window):
+        case .window(let window, let crop):
             filter = SCContentFilter(desktopIndependentWindow: window)
-            sizePoints = window.frame.size
-            // SCWindow.frame is already Quartz-global (top-left origin).
-            captureOriginQuartz = window.frame.origin
+            // SCWindow.frame is already Quartz-global (top-left origin); a
+            // crop is local to the window, as `sourceRect` expects.
+            if let crop {
+                config.sourceRect = crop
+                sizePoints = crop.size
+                captureOriginQuartz = CGPoint(
+                    x: window.frame.minX + crop.minX, y: window.frame.minY + crop.minY
+                )
+            } else {
+                sizePoints = window.frame.size
+                captureOriginQuartz = window.frame.origin
+            }
         }
 
         // Capture at physical pixel resolution, rounded down to even numbers

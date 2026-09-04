@@ -105,6 +105,15 @@ model to start Crisp before its computer-use actions and to stop cleanly after
 the demonstration. Screen Recording and Chrome Automation permissions still
 belong to the installed, signed Crisp app.
 
+The cursor and zooms come from the real pointer. Crisp logs the system mouse
+during a recording and plans zooms from its clicks, so the agent has to
+demonstrate with pointer-based computer use (mouse moves and clicks at screen
+coordinates inside the recorded source). Agents that drive the target through
+accessibility actions or DOM automation produce clips with no cursor and no
+zooms. A Chrome tab source crops to the page once Crisp is allowed under
+Privacy & Security > Accessibility; without that grant it records the whole
+Chrome window.
+
 ### Skill and CLI fallback
 
 To make it available to Codex and ChatGPT from every project on this Mac:

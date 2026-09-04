@@ -21,6 +21,9 @@ final class MouseTracker {
     /// For window captures: the window to follow. Its bounds are re-read while
     /// recording so a moved or resized window keeps mapping correctly.
     private var windowID: CGWindowID?
+    /// For cropped window captures: the crop's origin relative to the window.
+    /// The crop keeps its size when the window is resized mid-recording.
+    private var cropInset: CGPoint?
     private var ticksSinceBoundsRefresh = 0
     /// Host seconds of the first video frame; nil until capture actually starts.
     /// Deliberately not reset by `start()`: the engine may report it before or
@@ -34,11 +37,15 @@ final class MouseTracker {
         CMClockGetTime(CMClockGetHostTimeClock()).seconds
     }
 
-    func start(originQuartz: CGPoint, sizePoints: CGSize, scale: Double, windowID: CGWindowID? = nil) {
+    func start(
+        originQuartz: CGPoint, sizePoints: CGSize, scale: Double,
+        windowID: CGWindowID? = nil, cropInset: CGPoint? = nil
+    ) {
         self.captureBounds = CGRect(origin: originQuartz, size: sizePoints)
         self.scale = scale
         self.pixelSize = CGSize(width: sizePoints.width * scale, height: sizePoints.height * scale)
         self.windowID = windowID
+        self.cropInset = cropInset
         events = []
         samples = []
 
@@ -170,7 +177,10 @@ final class MouseTracker {
         ticksSinceBoundsRefresh += 1
         guard ticksSinceBoundsRefresh >= 10 else { return }
         ticksSinceBoundsRefresh = 0
-        if let bounds = Self.currentBounds(of: windowID), bounds.width > 0, bounds.height > 0 {
+        guard let bounds = Self.currentBounds(of: windowID), bounds.width > 0, bounds.height > 0 else { return }
+        if let cropInset {
+            captureBounds.origin = CGPoint(x: bounds.minX + cropInset.x, y: bounds.minY + cropInset.y)
+        } else {
             captureBounds = bounds
         }
     }

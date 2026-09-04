@@ -83,6 +83,11 @@ final class AppModel: ObservableObject {
     @Published var windowPickerMode: WindowPickerMode = .apps
     @Published var chromeTabs: [ChromeTab] = []
     @Published var chromeTabsStatus: ChromeTabsStatus = .idle
+    /// Whether Crisp may read Chrome's accessibility tree, which is how a tab
+    /// recording is cropped to the page. Re-checked whenever a tab is picked.
+    @Published var hasAccessibilityAccess = ChromeBridge.hasAccessibilityAccess()
+    /// Page area of the selected Chrome tab's window, refreshed at record time.
+    private var chromePageCrop: CGRect?
     /// Set when the selected window was chosen as a Chrome tab. ScreenCaptureKit
     /// records the window, so the tab is re-activated right before recording.
     @Published var selectedChromeTab: ChromeTab?
@@ -480,6 +485,9 @@ final class AppModel: ObservableObject {
     /// Pick a Chrome tab: bring it forward in its window and target that window.
     func selectChromeTab(_ tab: ChromeTab) {
         selectedChromeTab = tab
+        // First pick asks for Accessibility once, so the page crop is ready
+        // by the time the user records.
+        hasAccessibilityAccess = ChromeBridge.hasAccessibilityAccess(prompt: !hasAccessibilityAccess)
         Task {
             do {
                 let window = try await activateChromeTab(tab)
@@ -492,6 +500,18 @@ final class AppModel: ObservableObject {
                 loadChromeTabs()
             }
         }
+    }
+
+    /// Page area of a Chrome window, logged either way so a whole-window
+    /// take can be explained after the fact.
+    static func pageCrop(in window: SCWindow) async -> CGRect? {
+        let crop = await ChromeBridge.pageCrop(in: window)
+        if let crop {
+            log("chrome: cropping to page area \(crop)")
+        } else {
+            log("chrome: recording the whole window (accessibility access: \(ChromeBridge.hasAccessibilityAccess()))")
+        }
+        return crop
     }
 
     private func activateChromeTab(_ tab: ChromeTab) async throws -> SCWindow {
@@ -535,7 +555,7 @@ final class AppModel: ObservableObject {
             return .display(display)
         case .window:
             guard let window = selectedWindow else { return nil }
-            return .window(window)
+            return .window(window, crop: selectedChromeTab == nil ? nil : chromePageCrop)
         case .region:
             guard let display = selectedDisplay, let region else { return nil }
             return .region(display, region)
@@ -554,7 +574,9 @@ final class AppModel: ObservableObject {
         if sourceKind == .window, let tab = selectedChromeTab {
             // The user may have switched tabs since picking; show theirs again.
             do {
-                selectedWindowID = try await activateChromeTab(tab).windowID
+                let window = try await activateChromeTab(tab)
+                selectedWindowID = window.windowID
+                chromePageCrop = await Self.pageCrop(in: window)
             } catch {
                 return failRecordingStart(error.localizedDescription)
             }
@@ -631,12 +653,17 @@ final class AppModel: ObservableObject {
                 masterURL: folder.appendingPathComponent("master.mov")
             )
             var windowID: CGWindowID?
-            if case .window(let window) = source { windowID = window.windowID }
+            var cropInset: CGPoint?
+            if case .window(let window, let crop) = source {
+                windowID = window.windowID
+                cropInset = crop?.origin
+            }
             tracker.start(
                 originQuartz: engine.captureOriginQuartz,
                 sizePoints: engine.capturePointSize,
                 scale: engine.scaleFactor,
-                windowID: windowID
+                windowID: windowID,
+                cropInset: cropInset
             )
 
             self.engine = engine

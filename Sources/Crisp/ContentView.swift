@@ -218,6 +218,10 @@ struct ContentView: View {
                         regionRow
                             .disabled(model.isRecording)
                     }
+                    if model.sourceKind == .window, model.selectedChromeTab != nil,
+                       !model.hasAccessibilityAccess {
+                        chromeCropHint
+                    }
                     selectionPreview
                         .frame(maxWidth: .infinity, minHeight: 431, maxHeight: .infinity)
                 }
@@ -319,6 +323,19 @@ struct ContentView: View {
         RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
             .fill(Theme.panel)
             .overlay(content())
+    }
+
+    /// Tab recordings crop to the page only with the Accessibility grant.
+    private var chromeCropHint: some View {
+        HStack(spacing: 8) {
+            Text("Recording the whole Chrome window. Allow Crisp under Accessibility to crop to the page.")
+                .font(Theme.font(.body12))
+                .foregroundStyle(Theme.mutedForeground)
+            Button("Open System Settings") {
+                NSWorkspace.shared.open(ChromeBridge.accessibilitySettingsURL)
+            }
+            .buttonStyle(.themed(.outline, size: .xs))
+        }
     }
 
     private var regionRow: some View {

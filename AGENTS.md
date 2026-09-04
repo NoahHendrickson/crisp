@@ -26,8 +26,19 @@ polished videos with animated zooms.
   the GUI, reactivate the same app build before its Stop Recording button.
 - Always stop a live recording cleanly. Quitting invokes asynchronous
   finalization so `master.mov` receives its movie metadata.
-- Chrome-tab capture activates the requested tab and records its whole Chrome
-  window. Other app targets use the App Windows picker.
+- Chrome-tab capture activates the requested tab and crops the recording to
+  the page area of its Chrome window, found through Chrome's accessibility
+  tree. Without the Accessibility grant it records the whole window, tab strip
+  and toolbar included. Other app targets use the App Windows picker.
+- Crisp does not capture the cursor. It logs the real system pointer and
+  clicks during a recording, draws the cursor at export, and plans zooms from
+  the clicks. Demonstrations driven by accessibility actions, DOM or DevTools
+  automation, or keyboard alone produce recordings with no cursor and no
+  zooms; drive the target with real mouse moves and clicks inside the source.
+- The MCP server and `crispctl` bind to the app bundle they ship in and only
+  the instance named in that bundle's `ready` file answers. Never control
+  Crisp's own window with computer use while those tools are available, and
+  do not mix builds within one session.
 - The bundled `crisp-mcp` server is the preferred agent-facing capture API;
   `crispctl` is its CLI fallback. `--agent-tool` is a separate interface for
   inspecting and editing an existing recording.

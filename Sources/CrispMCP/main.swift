@@ -77,7 +77,7 @@ private final class Server {
                 "protocolVersion": version,
                 "capabilities": ["tools": ["listChanged": false]],
                 "serverInfo": ["name": "crisp", "version": serverVersion],
-                "instructions": "Use Crisp to record requested app, project, browser, or web-view demonstrations. List sources when the target is uncertain, start recording before computer-use interactions, and always stop recording cleanly afterward. Do not start a second recording while one is active.",
+                "instructions": "Use Crisp to record requested app, project, browser, or web-view demonstrations. List sources when the target is uncertain, start recording before the demonstration, and always stop recording cleanly afterward. Crisp logs the real system pointer and plans its zooms from real clicks: drive the demonstration with pointer-based computer use (move the mouse and click at screen coordinates inside the recorded source), not accessibility, DOM, or DevTools automation, or the clip will have no cursor and no zooms. Keep the pointer inside the recorded source and keep the source unobstructed. A chrome tab source activates the tab and crops to its page area when Crisp has Accessibility access; otherwise it records the whole Chrome window and list_sources warns about it. These tools are the only control path for this Crisp build: never operate Crisp's own window with computer use, and get_recording_status reports only this build. Do not start a second recording while one is active.",
             ])
 
         case "ping":
@@ -133,7 +133,7 @@ private final class Server {
             [
                 "name": "start_recording",
                 "title": "Start a Crisp recording",
-                "description": "Start recording exactly one source. Prefer source_id from list_sources; chrome_url, window, and display are convenient case-insensitive selectors that must match one source. After this succeeds, perform the requested demonstration with computer use and then call stop_recording.",
+                "description": "Start recording exactly one source. Prefer source_id from list_sources; chrome_url, window, and display are convenient case-insensitive selectors that must match one source. A Chrome tab source activates the tab and crops to its page area when Crisp has Accessibility access (list_sources warns when it does not). After this succeeds, perform the requested demonstration with pointer-based computer use (real mouse moves and clicks inside the source, about a second apart) and then call stop_recording. Accessibility or DOM automation leaves the recording without a cursor or zooms.",
                 "inputSchema": startSchema,
                 "annotations": [
                     "readOnlyHint": false,
@@ -145,7 +145,7 @@ private final class Server {
             [
                 "name": "get_recording_status",
                 "title": "Get Crisp recording status",
-                "description": "Report whether Crisp is idle, recording, or showing an error. Use this to diagnose uncertainty; do not start another recording when the state is recording.",
+                "description": "Report whether this Crisp build is idle, recording, or showing an error. Use this to diagnose uncertainty; do not start another recording when the state is recording. A recording started by hand or in another Crisp build is not visible here.",
                 "inputSchema": emptySchema,
                 "annotations": appLaunchingAnnotations,
             ],

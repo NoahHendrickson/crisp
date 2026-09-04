@@ -11,6 +11,12 @@ Crisp app, so Screen Recording permission and clean movie finalization stay
 with the app. Fall back to the bundled local control CLI when Crisp MCP tools
 are not connected.
 
+The MCP server and `crispctl` each bind to the Crisp app bundle they ship in.
+Use only those tools to control recording during a session: never click, key,
+or raise Crisp's own window with computer use, and never mix builds. Status,
+start, and stop all describe that one app; a recording started by hand or in
+another Crisp build is invisible to it.
+
 ## MCP workflow
 
 1. Call `list_sources` when the exact target is uncertain. Prefer its exact
@@ -18,8 +24,9 @@ are not connected.
    works.
 2. Call `start_recording` and require a successful result whose status is
    `recording` before demonstrating anything.
-3. Perform the requested actions with computer use. Keep them deliberate and
-   avoid unrelated notifications, credentials, or private tabs.
+3. Perform the requested actions with pointer-based computer use, as described
+   under "Drive the demonstration with the real pointer". Keep them deliberate
+   and avoid unrelated notifications, credentials, or private tabs.
 4. Always call `stop_recording`. Require an `idle` result with `master` and
    `events` paths, then confirm both files exist and `master.mov` is non-empty.
    Use `get_recording_status` for diagnosis and never start a second recording
@@ -27,6 +34,27 @@ are not connected.
 
 The rest of this skill documents preparation, permissions, delivery, and the
 CLI fallback in detail.
+
+## Drive the demonstration with the real pointer
+
+Crisp does not capture the on-screen cursor. It logs the system pointer's
+position and clicks while recording, re-renders the cursor at export, and
+plans its automatic zooms from those logged clicks. Anything that acts on the
+target without moving the pointer leaves no trace: accessibility actions
+(element-id clicks, AXPress), DOM or DevTools automation (Playwright, CDP,
+browser-session tabs), AppleScript, and keyboard-only flows. A recording made
+that way has no cursor and no zooms, and its editor shows nothing to zoom on.
+
+- Move the mouse to each control and click at its screen coordinates. Leave
+  about a second between actions so each click gets its own zoom, and type
+  only after clicking the field.
+- Keep the pointer inside the recorded window or display for the whole take.
+  Samples outside the source are dropped.
+- Keep the target frontmost and unobstructed on one display. Crisp hides its
+  own window when recording starts, so nothing else needs to move.
+- Pointer-free "background" automation cannot produce a polished clip. If the
+  user asks for a hands-off recording, say that it will be a plain capture
+  without cursor or zooms before starting, and let them choose.
 
 ## Prepare
 
@@ -36,7 +64,11 @@ CLI fallback in detail.
 2. Prepare the target before recording. Start the project's development server
    when needed, open the requested route, wait for it to settle, and size the
    target window appropriately. For a URL, prefer a visible Google Chrome tab
-   because Crisp can select Chrome tabs by title and host.
+   because Crisp can select Chrome tabs by title and host. A Chrome tab source
+   activates that tab and crops the recording to the page area of its window
+   when Crisp has Accessibility access; otherwise it records the whole window,
+   tab strip and toolbar included, and `list_sources` (or `crispctl sources`)
+   warns about it. Relay that warning instead of improvising a crop.
 3. Find the CLI in this order: `crispctl` on `PATH`,
    `/Applications/Crisp.app/Contents/MacOS/crispctl`, then the current repo's
    `build/Crisp Dev.app/Contents/MacOS/crispctl`. Use the same executable for

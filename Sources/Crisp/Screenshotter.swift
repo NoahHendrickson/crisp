@@ -47,9 +47,10 @@ enum Screenshotter {
             filter = SCContentFilter(display: display, excludingWindows: ownWindows)
             config.sourceRect = rect
             sizePoints = rect.size
-        case .window(let window):
+        case .window(let window, let crop):
             filter = SCContentFilter(desktopIndependentWindow: window)
-            sizePoints = window.frame.size
+            if let crop { config.sourceRect = crop }
+            sizePoints = crop?.size ?? window.frame.size
         }
 
         let scale = Double(filter.pointPixelScale)
