@@ -3,290 +3,427 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Download Crisp for macOS</title>
-  <meta name="description" content="Crisp is a high-bitrate macOS screen recorder that exports with animated zooms to where you clicked. Free download for macOS 14 and later.">
-  <meta property="og:title" content="Download Crisp for macOS">
-  <meta property="og:description" content="High-bitrate screen recording with click-tracked auto-zoom export. 10-bit HEVC and ProRes, gradient-friendly.">
+  <title>Crisp — Screen recordings that land</title>
+  <meta name="description" content="Crisp is a native macOS screen recorder with click-aware animated zooms, a precise timeline editor, and maximum-fidelity export.">
+  <meta property="og:title" content="Crisp — Screen recordings that land">
+  <meta property="og:description" content="Record at full fidelity. Shape every zoom. Export a polished screen recording.">
   <meta property="og:image" content="https://noahhendrickson.github.io/crisp/icon.png">
+  <meta name="theme-color" content="#f4f2e8">
   <link rel="icon" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap" rel="stylesheet">
   <style>
     :root {
-      --background: #f8f7eb;
-      --foreground: #23201e;
-      --text-secondary: #55514f;
-      --muted-foreground: #737373;
-      --border: #e8e4e1;
-      --well: #ffffff;
-      --panel: #eeebe2;
-      --code: #23201e0f;
-      --primary: #44b4ff;
-      --primary-border: #0d95ef;
-      --primary-foreground: #f8f7eb;
-      --radius-md: 8px;
-      --radius-lg: 16px;
+      --paper: #f4f2e8;
+      --paper-raised: #fbfaf5;
+      --ink: #1f1e1c;
+      --muted: #68645e;
+      --line: rgba(31, 30, 28, 0.14);
+      --blue: #4aaeff;
+      --blue-dark: #128fe7;
+      --violet: #8f72ff;
+      --mint: #43c591;
+      --orange: #ff9d4a;
+      --night: #171819;
+      --night-raised: #222426;
+      --night-line: rgba(255, 255, 255, 0.13);
+      --radius-md: 20px;
+      --radius-lg: 30px;
+      --shadow: 0 28px 80px rgba(35, 32, 29, 0.16), 0 6px 22px rgba(35, 32, 29, 0.08);
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --background: #23201e;
-        --foreground: #f8f7eb;
-        --text-secondary: #d4d4d4;
-        --muted-foreground: #a1a1a1;
-        --border: #ffffff1f;
-        --well: #2b2825;
-        --panel: #2b2825;
-        --code: #ffffff14;
-      }
-    }
+
     * { box-sizing: border-box; }
-    html, body { margin: 0; }
+    html { scroll-behavior: smooth; }
     body {
-      background: var(--background);
-      color: var(--foreground);
-      font-family: "Geist", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Geist", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
       font-size: 16px;
-      line-height: 1.5;
+      line-height: 1.55;
       -webkit-font-smoothing: antialiased;
     }
-    main {
-      max-width: 560px;
-      margin: 0 auto;
-      padding: 72px 24px 64px;
-    }
-    header { text-align: center; }
-    .icon {
-      width: 128px;
-      height: 128px;
-      display: block;
-      margin: 0 auto 8px;
-    }
-    h1 {
-      font-size: 30px;
-      font-weight: 600;
-      line-height: 1.2;
-      margin: 0 0 8px;
-      letter-spacing: -0.01em;
-    }
-    .tagline {
-      color: var(--text-secondary);
-      margin: 0 auto;
-      max-width: 440px;
-    }
-    .download {
-      margin: 32px 0 12px;
+    a { color: inherit; }
+    img { display: block; max-width: 100%; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .shell { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+
+    .site-header {
+      height: 82px;
       display: flex;
-      flex-direction: column;
       align-items: center;
-      gap: 10px;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
     }
-    .button {
+    .brand {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
-      background: var(--primary);
-      color: var(--primary-foreground);
-      border: 1px solid var(--primary-border);
-      border-radius: var(--radius-md);
-      padding: 14px 28px;
+      gap: 11px;
+      color: var(--ink);
       font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+    .brand img { width: 34px; height: 34px; border-radius: 9px; }
+    .nav { display: flex; align-items: center; gap: 28px; }
+    .nav-link {
+      color: var(--muted);
+      font-size: 14px;
       font-weight: 500;
       text-decoration: none;
-      box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.12);
-      transition: transform .08s ease, filter .12s ease;
+      transition: color 160ms ease;
     }
-    .button:hover { filter: brightness(1.05); }
-    .button:active { transform: translateY(1px); }
-    .button svg { width: 20px; height: 20px; flex: none; }
-    .meta {
-      color: var(--muted-foreground);
-      font-size: 14px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+    .nav-link:hover { color: var(--ink); }
+
+    .button {
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
       justify-content: center;
-      min-height: 21px;
-    }
-    .meta span + span::before { content: "·"; margin-right: 8px; }
-    .requirements {
-      text-align: center;
-      color: var(--muted-foreground);
-      font-size: 14px;
-      margin: 0 0 48px;
-    }
-    .requirements a { color: inherit; }
-    h2 {
-      font-size: 20px;
-      font-weight: 600;
-      margin: 40px 0 12px;
-    }
-    ol.steps {
-      list-style: none;
-      counter-reset: step;
-      padding: 0;
-      margin: 0;
-      border-top: 1px solid var(--border);
-    }
-    ol.steps li {
-      counter-increment: step;
-      position: relative;
-      padding: 18px 0 18px 40px;
-      border-bottom: 1px solid var(--border);
-    }
-    ol.steps li::before {
-      content: counter(step);
-      position: absolute;
-      left: 0;
-      top: 18px;
-      color: var(--muted-foreground);
-      font-size: 14px;
-      font-variant-numeric: tabular-nums;
-      line-height: 24px;
-    }
-    ol.steps strong { font-weight: 500; display: block; margin-bottom: 4px; }
-    ol.steps p { margin: 0; color: var(--text-secondary); font-size: 15px; }
-    details { margin-top: 8px; font-size: 14px; color: var(--text-secondary); }
-    summary { cursor: pointer; color: var(--muted-foreground); }
-    summary:hover { color: var(--foreground); }
-    code {
-      font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      font-size: 0.9em;
-      background: var(--code);
-      padding: 1px 5px;
-      border-radius: 4px;
-    }
-    pre {
-      background: var(--code);
-      border-radius: var(--radius-md);
-      padding: 10px 12px;
-      overflow-x: auto;
-      margin: 8px 0 0;
-    }
-    pre code { background: none; padding: 0; font-size: 13px; }
-    ul.features {
-      padding: 0;
-      margin: 0;
-      list-style: none;
-      display: grid;
-      gap: 8px;
-      color: var(--text-secondary);
+      gap: 9px;
+      border: 1px solid var(--blue-dark);
+      border-radius: 999px;
+      background: var(--blue);
+      color: #08131a;
+      padding: 0 22px;
       font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      box-shadow: 0 8px 20px rgba(34, 150, 230, 0.22), inset 0 1px rgba(255,255,255,.38);
+      transition: transform 160ms ease, filter 160ms ease, box-shadow 160ms ease;
     }
-    ul.features li { padding-left: 22px; position: relative; }
-    ul.features li::before {
-      content: "";
+    .button:hover { transform: translateY(-2px); filter: brightness(1.035); box-shadow: 0 12px 28px rgba(34, 150, 230, 0.28), inset 0 1px rgba(255,255,255,.38); }
+    .button:active { transform: translateY(0); }
+    .button svg { width: 18px; height: 18px; }
+    .button-small { min-height: 40px; padding: 0 18px; font-size: 14px; }
+
+    .hero {
+      position: relative;
+      padding: 104px 0 94px;
+      overflow: hidden;
+    }
+    .hero-copy { position: relative; z-index: 1; max-width: 870px; margin: 0 auto 68px; text-align: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(251,250,245,.65);
+      padding: 7px 12px 7px 9px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 500;
+      backdrop-filter: blur(12px);
+    }
+    .eyebrow-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 4px rgba(67,197,145,.16); }
+    h1 {
+      max-width: 850px;
+      margin: 0 auto;
+      font-size: clamp(3.6rem, 8vw, 6.9rem);
+      font-weight: 500;
+      line-height: .91;
+      letter-spacing: -.075em;
+    }
+    .hero-copy > p {
+      max-width: 640px;
+      margin: 30px auto 0;
+      color: var(--muted);
+      font-size: clamp(1.1rem, 2vw, 1.3rem);
+      line-height: 1.5;
+      letter-spacing: -.015em;
+    }
+    .hero-actions { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 34px; }
+    .hero-meta { color: var(--muted); font-size: 13px; min-height: 20px; }
+
+    .product-stage { position: relative; z-index: 1; max-width: 1140px; margin: 0 auto; }
+    .screen {
+      position: relative;
+      overflow: hidden;
+      margin: 0;
+      border: 1px solid rgba(255,255,255,.72);
+      border-radius: var(--radius-md);
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+    .screen img { width: 100%; height: auto; }
+    .callout {
       position: absolute;
-      left: 4px;
-      top: 9px;
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--primary);
-    }
-    ul.features strong { color: var(--foreground); font-weight: 500; }
-    footer {
-      margin-top: 56px;
-      padding-top: 20px;
-      border-top: 1px solid var(--border);
-      color: var(--muted-foreground);
-      font-size: 14px;
       display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid rgba(255,255,255,.7);
+      border-radius: 999px;
+      background: rgba(25, 26, 27, .86);
+      color: white;
+      padding: 10px 15px 10px 10px;
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: 0 12px 30px rgba(0,0,0,.22);
+      backdrop-filter: blur(14px);
     }
-    footer a { color: inherit; }
-    footer a:hover { color: var(--foreground); }
-    a { color: var(--foreground); }
-    .notes { margin-top: 12px; text-align: center; font-size: 14px; }
-    .notes a { color: var(--muted-foreground); }
+    .callout-one { top: 36%; left: -24px; }
+    .callout-two { right: -24px; bottom: 15%; }
+    .callout-icon { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; }
+    .callout-one .callout-icon { background: var(--blue); color: #10212c; }
+    .callout-two .callout-icon { background: var(--orange); color: #29180b; }
+
+    .proof {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      margin-top: 56px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .proof-item { padding: 24px 26px; border-right: 1px solid var(--line); }
+    .proof-item:first-child { padding-left: 0; }
+    .proof-item:last-child { border-right: 0; }
+    .proof-value { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.04em; }
+    .proof-label { display: block; margin-top: 3px; color: var(--muted); font-size: 13px; }
+
+    .section { padding: 126px 0; }
+    h2 { margin: 0; font-size: clamp(2.5rem, 5vw, 4.8rem); font-weight: 500; line-height: 1.02; letter-spacing: -.06em; }
+    .section-lead { max-width: 590px; margin: 22px 0 0; color: var(--muted); font-size: 18px; }
+
+    .features { background: var(--night); color: #f7f5ec; }
+    .features .section-lead { color: #aaa9a4; }
+    .feature-grid { display: grid; grid-template-columns: 1.12fr .88fr; gap: 18px; margin-top: 58px; }
+    .feature-card {
+      position: relative;
+      min-height: 340px;
+      overflow: hidden;
+      border: 1px solid var(--night-line);
+      border-radius: var(--radius-md);
+      background: var(--night-raised);
+      padding: 34px;
+    }
+    .feature-card-wide { grid-column: span 2; min-height: 300px; }
+    .feature-card h3 { margin: 0; font-size: 24px; font-weight: 500; letter-spacing: -.035em; }
+    .feature-card p { max-width: 450px; margin: 12px 0 0; color: #a8a7a2; }
+    .feature-number { position: absolute; top: 30px; right: 32px; color: #72716e; font-size: 13px; }
+    .timeline-demo { position: absolute; left: 34px; right: 34px; bottom: 36px; display: grid; gap: 10px; }
+    .track { position: relative; height: 17px; overflow: hidden; border-radius: 6px; background: #343638; }
+    .track::before { content: ""; position: absolute; height: 100%; border-radius: inherit; }
+    .track:nth-child(1)::before { left: 3%; width: 94%; background: var(--mint); }
+    .track:nth-child(2)::before { left: 22%; width: 63%; background: var(--blue); }
+    .track:nth-child(3)::before { left: 47%; width: 22%; background: var(--orange); }
+    .cursor-orbit { position: absolute; width: 210px; height: 210px; right: 55px; bottom: 20px; border: 1px solid rgba(255,255,255,.14); border-radius: 50%; }
+    .cursor-orbit::before, .cursor-orbit::after { content: ""; position: absolute; border-radius: 50%; border: 1px solid rgba(255,255,255,.1); }
+    .cursor-orbit::before { inset: 26px; }
+    .cursor-orbit::after { inset: 62px; background: radial-gradient(circle, rgba(74,174,255,.45), rgba(74,174,255,.04) 68%); }
+    .cursor { position: absolute; right: 105px; bottom: 87px; width: 34px; height: 45px; filter: drop-shadow(0 8px 8px rgba(0,0,0,.35)); transform: rotate(-8deg); }
+    .agent-line { position: absolute; left: 34px; right: 34px; bottom: 42px; display: flex; align-items: center; gap: 12px; }
+    .agent-pill { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--night-line); border-radius: 999px; background: #191a1b; padding: 10px 15px; color: #d9d8d3; font-size: 13px; }
+    .agent-pill span { width: 8px; height: 8px; border-radius: 50%; background: var(--violet); box-shadow: 0 0 14px var(--violet); }
+    .agent-rule { height: 1px; flex: 1; background: linear-gradient(90deg, rgba(143,114,255,.8), transparent); }
+
+    .workflow-header { display: grid; grid-template-columns: 1fr 1fr; align-items: end; gap: 50px; }
+    .workflow-header .section-lead { justify-self: end; }
+    .workflow-grid { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 68px; border-top: 1px solid var(--line); }
+    .step { padding: 32px 34px 0 0; }
+    .step + .step { padding-left: 34px; border-left: 1px solid var(--line); }
+    .step-mark { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--paper-raised); color: var(--muted); font-size: 13px; }
+    .step h3 { margin: 28px 0 9px; font-size: 21px; font-weight: 600; letter-spacing: -.03em; }
+    .step p { margin: 0; color: var(--muted); font-size: 15px; }
+
+    .download-section { padding: 0 0 32px; }
+    .download-card { position: relative; overflow: hidden; border-radius: var(--radius-lg); background: #dff1fd; padding: 82px 76px; }
+    .download-copy { position: relative; z-index: 1; max-width: 660px; }
+    .download-card h2 { font-size: clamp(2.8rem, 5.5vw, 5.3rem); }
+    .download-card p { max-width: 540px; margin: 22px 0 30px; color: #45525b; font-size: 18px; }
+    .requirements { margin-top: 14px !important; font-size: 13px !important; }
+
+    footer { padding: 28px 0 42px; }
+    .footer-row { display: flex; align-items: center; justify-content: space-between; gap: 28px; }
+    .footer-links { display: flex; flex-wrap: wrap; gap: 22px; }
+    .footer-links a, .copyright { color: var(--muted); font-size: 13px; }
+    .footer-links a:hover { color: var(--ink); }
+
+    @media (max-width: 900px) {
+      .hero { padding-top: 78px; }
+      .callout { display: none; }
+      .proof { grid-template-columns: repeat(2, 1fr); }
+      .proof-item:nth-child(2) { border-right: 0; }
+      .proof-item:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .proof-item:nth-child(3) { padding-left: 0; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .feature-card-wide { grid-column: span 1; }
+      .workflow-header { grid-template-columns: 1fr; gap: 0; }
+      .workflow-header .section-lead { justify-self: start; }
+      .download-card { padding: 64px 48px; }
+    }
+
+    @media (max-width: 680px) {
+      .shell { width: min(100% - 28px, 1180px); }
+      .site-header { height: 70px; }
+      .nav-link { display: none; }
+      .button-small { min-height: 38px; padding: 0 15px; }
+      .hero { padding: 68px 0 72px; }
+      h1 { font-size: clamp(3.5rem, 18vw, 5rem); }
+      .hero-copy { margin-bottom: 48px; }
+      .hero-copy > p { margin-top: 24px; font-size: 17px; }
+      .hero-actions { flex-direction: column; }
+      .screen { border-radius: 13px; }
+      .proof { margin-top: 34px; }
+      .proof-item { padding: 18px 16px; }
+      .proof-value { font-size: 19px; }
+      .section { padding: 88px 0; }
+      .feature-card { min-height: 315px; padding: 26px; }
+      .timeline-demo { left: 26px; right: 26px; bottom: 30px; }
+      .cursor-orbit { right: 28px; }
+      .cursor { right: 78px; }
+      .agent-line { left: 26px; right: 26px; }
+      .workflow-grid { grid-template-columns: 1fr; margin-top: 46px; }
+      .step, .step + .step { padding: 26px 0 32px; border-left: 0; border-bottom: 1px solid var(--line); }
+      .download-section { padding-bottom: 18px; }
+      .download-card { border-radius: 22px; padding: 50px 28px 130px; }
+      .footer-row { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: .01ms !important; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <img class="icon" src="icon.png" alt="" width="128" height="128">
-      <h1>Crisp</h1>
-      <p class="tagline">A macOS screen recorder built for quality. Record at full fidelity, then export with smooth animated zooms to wherever you clicked.</p>
+  <div class="shell">
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Crisp home"><img src="icon.png" alt="" width="34" height="34">Crisp</a>
+      <nav class="nav" aria-label="Main navigation">
+        <a class="nav-link" href="#editor">Editor</a>
+        <a class="nav-link" href="#workflow">How it works</a>
+        <a class="nav-link" href="https://github.com/NoahHendrickson/crisp">GitHub</a>
+        <a class="button button-small download-link" href="https://github.com/NoahHendrickson/crisp/releases/latest">Download</a>
+      </nav>
     </header>
+  </div>
 
-    <div class="download">
-      <a id="download" class="button" href="https://github.com/NoahHendrickson/crisp/releases/latest">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
-        </svg>
-        Download for macOS
-      </a>
-      <div class="meta" id="meta"></div>
-    </div>
-    <p class="requirements">
-      Requires macOS 14 Sonoma or later on Apple silicon. Free and open source.
-    </p>
+  <main id="top">
+    <section class="hero">
+      <div class="shell">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-dot"></span> Native screen recorder for macOS</div>
+          <h1>Make every screen recording land.</h1>
+          <p>Capture a maximum-fidelity master, then turn clicks into smooth, intentional camera moves in a timeline built for screen recordings.</p>
+          <div class="hero-actions">
+            <a class="button download-link" href="https://github.com/NoahHendrickson/crisp/releases/latest">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              Download for macOS
+            </a>
+            <span class="hero-meta" id="release-meta">Free &amp; open source</span>
+          </div>
+        </div>
 
-    <h2>Install</h2>
-    <ol class="steps">
-      <li>
-        <strong>Unzip and move to Applications</strong>
-        <p>Double-click the downloaded zip, then drag <code>Crisp.app</code> into your Applications folder.</p>
-      </li>
-      <li>
-        <strong>Open it the first time</strong>
-        <p>Crisp is signed but not notarized by Apple, so macOS will pause the first launch. Right-click <code>Crisp.app</code> and choose Open. If macOS only offers to move it to the Trash, open it once, then go to System Settings → Privacy &amp; Security, scroll down, and click <em>Open Anyway</em>.</p>
-        <details>
-          <summary>Prefer the Terminal?</summary>
-          <p>Clear the quarantine flag and Crisp opens like any other app:</p>
-          <pre><code>xattr -dr com.apple.quarantine /Applications/Crisp.app</code></pre>
-        </details>
-      </li>
-      <li>
-        <strong>Allow screen recording</strong>
-        <p>Grant Screen Recording when asked, then relaunch Crisp. That's the only permission it needs. Nothing else is monitored or sent anywhere.</p>
-      </li>
-    </ol>
+        <div class="product-stage" id="editor">
+          <figure class="screen"><img src="crisp-zoom-editor@2x.png" alt="Crisp zoom editor showing a video preview and a five-row timeline with zoom and framing ranges" width="3456" height="2168"></figure>
+          <div class="callout callout-one"><span class="callout-icon">↗</span> Click-aware camera</div>
+          <div class="callout callout-two"><span class="callout-icon">⌁</span> Precise zoom timing</div>
+        </div>
 
-    <h2>What you get</h2>
-    <ul class="features">
-      <li><strong>A maximum-fidelity master.</strong> 10-bit HEVC or ProRes at native Retina resolution and 60 fps, so gradients don't band.</li>
-      <li><strong>Automatic zooms.</strong> Every click is logged while you record, and the export smoothly zooms to the action.</li>
-      <li><strong>A simple editor.</strong> Adjust zoom levels and timing, trim, mark clips, and speed up the slow parts.</li>
-      <li><strong>An AI editorial pass.</strong> Hand the recording to Claude Code or Codex and compare before and after.</li>
-      <li><strong>Banding-free screenshots.</strong> 16-bit PNG or 10-bit HEIC captures in Display P3.</li>
-    </ul>
+        <div class="proof" aria-label="Crisp recording specifications">
+          <div class="proof-item"><span class="proof-value">10-bit</span><span class="proof-label">HEVC master</span></div>
+          <div class="proof-item"><span class="proof-value">60 fps</span><span class="proof-label">Native Retina capture</span></div>
+          <div class="proof-item"><span class="proof-value">P3</span><span class="proof-label">Wide-gamut color</span></div>
+          <div class="proof-item"><span class="proof-value">Local</span><span class="proof-label">Your files stay yours</span></div>
+        </div>
+      </div>
+    </section>
 
-    <footer>
-      <a id="notes" href="https://github.com/NoahHendrickson/crisp/releases/latest">Release notes</a>
-      <a href="https://github.com/NoahHendrickson/crisp/releases">All versions</a>
-      <a href="https://github.com/NoahHendrickson/crisp">Source on GitHub</a>
-      <a href="https://github.com/NoahHendrickson/crisp/issues/new">Report a problem</a>
-    </footer>
+    <section class="section features">
+      <div class="shell">
+        <h2>A better take is already in there.</h2>
+        <p class="section-lead">Crisp logs the cursor and every click while you record. The editor gives you the control to shape them after.</p>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-number">01</span>
+            <h3>Shape zooms on the timeline</h3>
+            <p>Set the level, drag the timing, pin the viewport, trim the take, and speed through the slow parts.</p>
+            <div class="timeline-demo" aria-hidden="true"><div class="track"></div><div class="track"></div><div class="track"></div></div>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">02</span>
+            <h3>Let the camera follow</h3>
+            <p>The viewport follows the cursor through each zoom, so the action stays framed without a pile of keyframes.</p>
+            <div class="cursor-orbit" aria-hidden="true"></div>
+            <svg class="cursor" viewBox="0 0 32 42" fill="none" aria-hidden="true"><path d="M3 2.5v29.4l7.3-6.7 5.3 12.3 5.4-2.4-5.3-11.8h10.1L3 2.5Z" fill="#fff" stroke="#151617" stroke-width="2" stroke-linejoin="round"/></svg>
+          </article>
+          <article class="feature-card feature-card-wide">
+            <span class="feature-number">03</span>
+            <h3>Ask for an editorial pass</h3>
+            <p>Hand the plan, click log, and annotated frames to Claude Code or Codex. Review the changes side by side before you keep them.</p>
+            <div class="agent-line" aria-hidden="true"><div class="agent-pill"><span></span> AI editor ready</div><div class="agent-rule"></div></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="workflow">
+      <div class="shell">
+        <div class="workflow-header">
+          <div><h2>Keep the fidelity. Lose the fuss.</h2></div>
+          <p class="section-lead">The whole workflow is native, local, and designed around one thing: making screen recordings feel considered.</p>
+        </div>
+        <div class="workflow-grid">
+          <article class="step"><span class="step-mark">01</span><h3>Choose the frame</h3><p>Record a display, an app window, a Chrome tab, or a region at native Retina resolution.</p></article>
+          <article class="step"><span class="step-mark">02</span><h3>Direct the attention</h3><p>Use the visual timeline to tune zooms, framing, clips, trims, and speed-ups.</p></article>
+          <article class="step"><span class="step-mark">03</span><h3>Export the polish</h3><p>Render a smooth 10-bit HEVC video or keep an archival ProRes master at full quality.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="download-section">
+      <div class="shell">
+        <div class="download-card">
+          <div class="download-copy">
+            <h2>Your next recording can be crisp.</h2>
+            <p>No account. No cloud upload. Just a native recorder, a focused editor, and the master files on your Mac.</p>
+            <a class="button download-link" href="https://github.com/NoahHendrickson/crisp/releases/latest">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              Download for macOS
+            </a>
+            <p class="requirements">Requires macOS 14 Sonoma or later on Apple silicon.</p>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
+  <footer>
+    <div class="shell footer-row">
+      <span class="copyright">© <span id="year"></span> Crisp. Free and open source.</span>
+      <div class="footer-links">
+        <a id="release-notes" href="https://github.com/NoahHendrickson/crisp/releases/latest">Release notes</a>
+        <a href="https://github.com/NoahHendrickson/crisp">Source</a>
+        <a href="https://github.com/NoahHendrickson/crisp/issues/new">Report a problem</a>
+      </div>
+    </div>
+  </footer>
+
   <script>
+    document.getElementById("year").textContent = new Date().getFullYear();
     (async () => {
       try {
-        const res = await fetch("https://api.github.com/repos/NoahHendrickson/crisp/releases/latest", {
-          headers: { Accept: "application/vnd.github+json" }
-        });
-        if (!res.ok) return;
-        const release = await res.json();
-        const zip = (release.assets || []).find(a => /\.zip$/i.test(a.name));
+        const response = await fetch("https://api.github.com/repos/NoahHendrickson/crisp/releases/latest", { headers: { Accept: "application/vnd.github+json" } });
+        if (!response.ok) return;
+        const release = await response.json();
+        const zip = (release.assets || []).find(asset => /\.zip$/i.test(asset.name));
         const version = (release.tag_name || "").replace(/^v/, "");
-        const parts = [];
-        if (version) parts.push(`Version ${version}`);
+        const detail = [];
+        if (version) detail.push(`Version ${version}`);
         if (zip) {
-          document.getElementById("download").href = zip.browser_download_url;
-          parts.push(`${(zip.size / 1048576).toFixed(1)} MB`);
+          document.querySelectorAll(".download-link").forEach(link => link.href = zip.browser_download_url);
+          detail.push(`${(zip.size / 1048576).toFixed(1)} MB`);
         }
-        if (release.published_at) {
-          const date = new Date(release.published_at);
-          parts.push(date.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }));
-        }
-        if (release.html_url) document.getElementById("notes").href = release.html_url;
-        document.getElementById("meta").innerHTML = parts.map(p => `<span>${p}</span>`).join("");
+        if (detail.length) document.getElementById("release-meta").textContent = detail.join(" · ");
+        if (release.html_url) document.getElementById("release-notes").href = release.html_url;
       } catch (_) {
-        // The button already links to the latest release page.
+        // The links already fall back to the latest release page.
       }
     })();
   </script>
