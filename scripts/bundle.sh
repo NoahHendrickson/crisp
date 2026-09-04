@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 
 if [[ "${1:-}" == "--release" ]]; then
     APP_NAME="Crisp"
