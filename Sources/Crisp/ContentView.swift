@@ -12,6 +12,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var searchText = ""
     @State private var libraryFilter: LibraryFilter = .all
+    @AppStorage("sidebar.sort") private var librarySort: LibrarySort = .newest
 
     /// Sidebar width, dragged at its trailing border and remembered across
     /// launches. Figma's 328 is the default; the capture column keeps the
@@ -593,11 +594,26 @@ struct ContentView: View {
             }
     }
 
-    /// Search field (h32) + 32pt ghost filter with a 16pt funnel, same
-    /// control size as the recording-row actions.
+    /// Search field (h32) + 32pt ghost sort and filter buttons with 16pt
+    /// icons, same control size as the recording-row actions.
     private var searchRow: some View {
         HStack(spacing: 4) {
             searchField
+            DropdownButton(
+                id: "library.sort", alignment: .trailing,
+                style: { _ in .themed(.ghost, size: .md, iconOnly: true) },
+                items: {
+                    LibrarySort.allCases.map { sort in
+                        DropdownItem(id: sort.rawValue, label: sort.rawValue,
+                                     checked: librarySort == sort) {
+                            librarySort = sort
+                        }
+                    }
+                }
+            ) { _ in
+                Icon(name: "arrows-down-up", size: 16, fallback: "arrow.up.arrow.down")
+            }
+            .tooltip("Sort recordings")
             DropdownButton(
                 id: "library.filter", alignment: .trailing,
                 style: { _ in .themed(.ghost, size: .md, iconOnly: true) },
@@ -650,7 +666,7 @@ struct ContentView: View {
 
     private var filteredRecordings: [Recording] {
         let query = searchText.trimmingCharacters(in: .whitespaces)
-        return model.recordings.filter { recording in
+        let matches = model.recordings.filter { recording in
             guard query.isEmpty || recording.name.localizedCaseInsensitiveContains(query) else {
                 return false
             }
@@ -659,6 +675,24 @@ struct ContentView: View {
             case .all: return true
             case .exported: return hasExport
             case .unexported: return !hasExport
+            }
+        }
+        // Sorted off the cached summaries — never the disk (rows re-render on
+        // every ~2s thumbnail tick). A summary the cache hasn't caught up with
+        // falls back to the name, which is the capture timestamp until renamed.
+        return matches.sorted { a, b in
+            let (left, right) = (model.summaries[a.folder], model.summaries[b.folder])
+            switch librarySort {
+            case .newest, .oldest:
+                guard let l = left?.recordedAt, let r = right?.recordedAt, l != r else {
+                    return librarySort == .newest ? a.name > b.name : a.name < b.name
+                }
+                return librarySort == .newest ? l > r : l < r
+            case .name:
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            case .largest:
+                let l = left?.fileSize ?? 0, r = right?.fileSize ?? 0
+                return l == r ? a.name > b.name : l > r
             }
         }
     }
@@ -699,6 +733,17 @@ struct ContentView: View {
     }
 }
 
+/// Sidebar sort menu, next to the filter. Newest first matches the order
+/// `Recording.loadAll()` returns, so it's the default.
+private enum LibrarySort: String, CaseIterable, Identifiable {
+    case newest = "Newest first"
+    case oldest = "Oldest first"
+    case name = "Name A–Z"
+    case largest = "Largest first"
+
+    var id: String { rawValue }
+}
+
 /// Sidebar filter menu behind the funnel button.
 private enum LibraryFilter: String, CaseIterable, Identifiable {
     case all = "All recordings"
@@ -733,9 +778,9 @@ private struct ZoomStepTag: View {
     }
 }
 
-/// Flat library row (Figma 76:13109 / 76:13499): name (double-click to
-/// rename), hover 32pt actions, then a Body/12 line — "MOV 50.3MB" plus
-/// the zoom/step tag.
+/// Flat library row (Figma 173:4047): name (double-click to rename), the
+/// always-present Edit button with its hover-revealed 28pt actions, then a
+/// Body/12 line — "MOV 50.3MB" plus the zoom/step tag.
 private struct RecordingRow: View {
     @EnvironmentObject var model: AppModel
     let recording: Recording
@@ -760,7 +805,7 @@ private struct RecordingRow: View {
             format: recording.masterURL.pathExtension.uppercased(),
             fileSize: nil, zoomCount: 0, stepCount: 0, hasExport: false
         )
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 if renaming {
                     renameField
@@ -772,11 +817,15 @@ private struct RecordingRow: View {
                         .onTapGesture(count: 2, perform: beginRename)
                 }
                 Spacer(minLength: 8)
-                if hovering || renaming {
-                    RecordingActionButtons(recording: recording)
-                }
+                // Fixed so a long name truncates instead of squeezing the
+                // Edit button's label.
+                RecordingActionButtons(
+                    recording: recording, showsSecondaryActions: hovering || renaming
+                )
+                .fixedSize()
+                .layoutPriority(1)
             }
-            .frame(height: 32)
+            .frame(height: 28)
             .onHover { hovering = $0 }
 
             HStack(spacing: 8) {
@@ -882,43 +931,56 @@ private struct RecordingRow: View {
     }
 }
 
+/// Row actions (Figma 173:4050): the emphatic Edit button always sits at the
+/// row's trailing edge; export / reveal / delete are ghost buttons that the
+/// row reveals to its left on hover.
 private struct RecordingActionButtons: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
     let recording: Recording
+    let showsSecondaryActions: Bool
 
     var body: some View {
         let exporting = model.exportProgress[recording.folder] != nil
         HStack(spacing: 1) {
+            if showsSecondaryActions {
+                Button {
+                    model.export(recording)
+                } label: {
+                    Icon(name: "export-duotone", size: 16, fallback: "square.and.arrow.up")
+                }
+                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                .disabled(exporting)
+                .tooltip("Export with zooms as \(model.exportFormat.rawValue). Earlier exports are kept.")
+                Button {
+                    model.reveal(recording)
+                } label: {
+                    Icon(name: "folder-open-duotone", size: 16, fallback: "folder")
+                }
+                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                .tooltip("Reveal in Finder")
+                Button {
+                    model.delete(recording)
+                } label: {
+                    Icon(name: "trash-duotone", size: 16, fallback: "trash")
+                }
+                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                .tooltip("Move recording and all exports to Trash")
+            }
+            // Figma 173:4240: `--emphatic` fill, 10pt radius, 12pt brush.
             Button {
                 openWindow(value: recording.folder)
             } label: {
-                Icon(name: "pencil-duotone", size: 16, fallback: "pencil")
+                HStack(spacing: 6) {
+                    Icon(name: "paint-brush-household", size: 12, fallback: "paintbrush")
+                    Text("Edit")
+                }
             }
-            .buttonStyle(.themed(.ghost, size: .md, iconOnly: true))
+            .buttonStyle(.themed(
+                .primary, size: .sm, corners: .all(10),
+                leadingIcon: true, tint: Theme.emphatic
+            ))
             .tooltip("Edit zooms")
-            Button {
-                model.export(recording)
-            } label: {
-                Icon(name: "export-duotone", size: 16, fallback: "square.and.arrow.up")
-            }
-            .buttonStyle(.themed(.ghost, size: .md, iconOnly: true))
-            .disabled(exporting)
-            .tooltip("Export with zooms as \(model.exportFormat.rawValue). Earlier exports are kept.")
-            Button {
-                model.reveal(recording)
-            } label: {
-                Icon(name: "folder-open-duotone", size: 16, fallback: "folder")
-            }
-            .buttonStyle(.themed(.ghost, size: .md, iconOnly: true))
-            .tooltip("Reveal in Finder")
-            Button {
-                model.delete(recording)
-            } label: {
-                Icon(name: "trash-duotone", size: 16, fallback: "trash")
-            }
-            .buttonStyle(.themed(.ghost, size: .md, iconOnly: true))
-            .tooltip("Move recording and all exports to Trash")
         }
     }
 }

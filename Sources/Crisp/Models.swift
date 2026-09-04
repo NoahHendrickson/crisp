@@ -583,6 +583,9 @@ struct Recording: Identifiable, Equatable {
         var stepCount: Int
         /// A whole-video or clip export exists.
         var hasExport: Bool
+        /// When the master was captured — the sidebar's date sorts, which
+        /// can't read the folder name because renaming drops the timestamp.
+        var recordedAt: Date?
     }
 
     var summary: Summary {
@@ -595,8 +598,17 @@ struct Recording: Identifiable, Equatable {
             fileSize: size,
             zoomCount: segments.count,
             stepCount: segments.reduce(0) { $0 + $1.steps.count },
-            hasExport: !exports.isEmpty || !clipExportURLs.isEmpty
+            hasExport: !exports.isEmpty || !clipExportURLs.isEmpty,
+            recordedAt: recordedAt
         )
+    }
+
+    /// The master's creation date, falling back to the folder's (a master
+    /// copied in by hand carries the source file's date).
+    private var recordedAt: Date? {
+        let keys: Set<URLResourceKey> = [.creationDateKey]
+        return (try? masterURL.resourceValues(forKeys: keys))?.creationDate
+            ?? (try? folder.resourceValues(forKeys: keys))?.creationDate
     }
 
     /// Next unused whole-video export filename: "<name>.<ext>", then
