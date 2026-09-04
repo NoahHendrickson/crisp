@@ -1,129 +1,183 @@
-// Generates the Crisp app icon: a macOS squircle filled with a smooth
-// diagonal gradient (the thing Crisp exists to preserve), with the re-drawn
-// cursor arrow and a click ripple.
+// Generates the Crisp app icon as Icon Composer packages, so macOS 26 renders
+// it with Liquid Glass: assets/AppIcon.icon (release) and assets/AppIcon-Dev.icon.
 //
-// Usage: swift scripts/GenerateIcon.swift <output.iconset dir> [dev]
-//        ("dev" switches the gradient to orange so the dev build is unmistakable)
-// Then:  iconutil -c icns <output.iconset>
+// The geometry is the Figma design (Crisp v1, node 163:3173 / 163:3178): a
+// ring with a wedge sweep, a core disc, and an orbiting dot that punches a gap
+// through the ring. Figma draws that gap as a background-colored stroke on the
+// dot; glass layers can't fake it that way, so the gap is subtracted from the
+// ring and wedge paths here and each shape becomes its own glass layer.
+//
+// Usage: swift scripts/GenerateIcon.swift
+// Then:  ./scripts/bundle.sh compiles the .icon with actool (Xcode 26).
 
-import Foundation
 import CoreGraphics
-import ImageIO
-import UniformTypeIdentifiers
+import Foundation
 
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    FileHandle.standardError.write(Data("usage: GenerateIcon.swift <out.iconset> [dev]\n".utf8))
-    exit(1)
-}
-let outDir = URL(fileURLWithPath: args[1], isDirectory: true)
-let isDev = args.count > 2 && args[2] == "dev"
-try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-
-func drawIcon(canvas: Int) -> CGImage? {
-    let s = CGFloat(canvas)
-    guard let ctx = CGContext(
-        data: nil, width: canvas, height: canvas,
-        bitsPerComponent: 8, bytesPerRow: 0,
-        space: CGColorSpace(name: CGColorSpace.sRGB)!,
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else { return nil }
-
-    // macOS icon grid: content squircle inset ~10% on a transparent canvas.
-    let inset = s * 0.098
-    let rect = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
-    let radius = rect.width * 0.225
-    let squircle = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-
-    ctx.addPath(squircle)
-    ctx.clip()
-
-    // The gradient — diagonal, dead smooth. Release: deep indigo → teal.
-    // Dev: burnt orange → amber, so the two builds are unmistakable.
-    let colors: [CGColor] = isDev
-        ? [
-            CGColor(srgbRed: 0.45, green: 0.12, blue: 0.02, alpha: 1),
-            CGColor(srgbRed: 0.85, green: 0.38, blue: 0.05, alpha: 1),
-            CGColor(srgbRed: 0.98, green: 0.65, blue: 0.12, alpha: 1),
-        ]
-        : [
-            CGColor(srgbRed: 0.10, green: 0.08, blue: 0.35, alpha: 1),
-            CGColor(srgbRed: 0.12, green: 0.35, blue: 0.66, alpha: 1),
-            CGColor(srgbRed: 0.15, green: 0.65, blue: 0.68, alpha: 1),
-        ]
-    let gradient = CGGradient(
-        colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-        colors: colors as CFArray,
-        locations: [0, 0.55, 1]
-    )!
-    ctx.drawLinearGradient(
-        gradient,
-        start: CGPoint(x: rect.minX, y: rect.minY),
-        end: CGPoint(x: rect.maxX, y: rect.maxY),
-        options: []
-    )
-
-    // Click ripple ring, upper-left of center.
-    let ringCenter = CGPoint(x: rect.midX - rect.width * 0.10, y: rect.midY + rect.height * 0.08)
-    ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.85))
-    ctx.setLineWidth(s * 0.028)
-    let ringRadius = rect.width * 0.17
-    ctx.strokeEllipse(in: CGRect(
-        x: ringCenter.x - ringRadius, y: ringCenter.y - ringRadius,
-        width: ringRadius * 2, height: ringRadius * 2
-    ))
-    ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.35))
-    let ring2 = ringRadius * 1.45
-    ctx.strokeEllipse(in: CGRect(
-        x: ringCenter.x - ring2, y: ringCenter.y - ring2,
-        width: ring2 * 2, height: ring2 * 2
-    ))
-
-    // Cursor arrow (same shape the exporter draws), tip at the ring center.
-    let arrowScale = s * 0.022
-    ctx.saveGState()
-    ctx.translateBy(x: ringCenter.x, y: ringCenter.y)
-    ctx.scaleBy(x: arrowScale, y: -arrowScale)  // cursor coords are y-down
-    let path = CGMutablePath()
-    path.move(to: .zero)
-    path.addLine(to: CGPoint(x: 0, y: 16.9))
-    path.addLine(to: CGPoint(x: 4.0, y: 13.0))
-    path.addLine(to: CGPoint(x: 6.6, y: 18.8))
-    path.addLine(to: CGPoint(x: 9.0, y: 17.7))
-    path.addLine(to: CGPoint(x: 6.4, y: 12.0))
-    path.addLine(to: CGPoint(x: 12.0, y: 12.0))
-    path.closeSubpath()
-    ctx.addPath(path)
-    ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-    ctx.setLineWidth(1.7)
-    ctx.setLineJoin(.round)
-    ctx.strokePath()
-    ctx.addPath(path)
-    ctx.setFillColor(CGColor(gray: 0.05, alpha: 1))
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    return ctx.makeImage()
+struct Variant {
+    let package: String
+    let fill: String   // Icon Composer color string
 }
 
-func write(_ image: CGImage, to url: URL) {
-    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-        exit(2)
-    }
-    CGImageDestinationAddImage(dest, image, nil)
-    CGImageDestinationFinalize(dest)
-}
-
-// iconset sizes: (filename points, pixels)
-let sizes: [(String, Int)] = [
-    ("icon_16x16", 16), ("icon_16x16@2x", 32),
-    ("icon_32x32", 32), ("icon_32x32@2x", 64),
-    ("icon_128x128", 128), ("icon_128x128@2x", 256),
-    ("icon_256x256", 256), ("icon_256x256@2x", 512),
-    ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+let variants = [
+    Variant(package: "assets/AppIcon.icon", fill: "srgb:1.00000,0.17647,0.34118,1.00000"),      // #FF2D57
+    Variant(package: "assets/AppIcon-Dev.icon", fill: "srgb:0.99216,0.32549,0.10588,1.00000"),  // #FD531B
 ]
-for (name, pixels) in sizes {
-    guard let image = drawIcon(canvas: pixels) else { exit(3) }
-    write(image, to: outDir.appendingPathComponent("\(name).png"))
+
+let ink = "#E8E4E1"
+let canvas: CGFloat = 1024
+
+// MARK: - Geometry (Figma coordinates, y down)
+
+func circle(_ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat) -> CGPath {
+    CGPath(ellipseIn: CGRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r), transform: nil)
 }
-print("iconset written to \(outDir.path)")
+
+// Ellipse 5: the dot, plus its 32pt background stroke which reads as a gap.
+let dot = circle(724, 310, 84)
+let dotGap = circle(724, 310, 100)
+
+// Ellipse 4: 24pt ring stroke, minus the gap.
+let ring = circle(512.5, 511.5, 292.5)
+    .copy(strokingWithWidth: 24, lineCap: .butt, lineJoin: .miter, miterLimit: 10)
+    .subtracting(dotGap)
+
+// Ellipse 3: the core disc.
+let core = circle(512, 512, 112)
+
+// Vector 51: the wedge sweep, minus the gap (the dot sits over its tip).
+let wedgePath = CGMutablePath()
+wedgePath.move(to: CGPoint(x: 717.5, y: 273.5))
+wedgePath.addLine(to: CGPoint(x: 290.5, y: 701.5))
+wedgePath.addCurve(to: CGPoint(x: 717.5, y: 718.5),
+                   control1: CGPoint(x: 409, y: 810.5), control2: CGPoint(x: 569.5, y: 845.7))
+wedgePath.addCurve(to: CGPoint(x: 717.5, y: 273.5),
+                   control1: CGPoint(x: 865.5, y: 591.3), control2: CGPoint(x: 788.5, y: 367))
+wedgePath.closeSubpath()
+let wedge = wedgePath.subtracting(dotGap)
+
+// MARK: - SVG
+
+func fmt(_ v: CGFloat) -> String {
+    let s = String(format: "%.3f", v)
+    return s.replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+}
+
+func svgData(_ path: CGPath) -> String {
+    var d = ""
+    path.applyWithBlock { element in
+        let p = element.pointee.points
+        switch element.pointee.type {
+        case .moveToPoint: d += "M\(fmt(p[0].x)) \(fmt(p[0].y))"
+        case .addLineToPoint: d += "L\(fmt(p[0].x)) \(fmt(p[0].y))"
+        case .addQuadCurveToPoint: d += "Q\(fmt(p[0].x)) \(fmt(p[0].y)) \(fmt(p[1].x)) \(fmt(p[1].y))"
+        case .addCurveToPoint:
+            d += "C\(fmt(p[0].x)) \(fmt(p[0].y)) \(fmt(p[1].x)) \(fmt(p[1].y)) \(fmt(p[2].x)) \(fmt(p[2].y))"
+        case .closeSubpath: d += "Z"
+        @unknown default: break
+        }
+    }
+    return d
+}
+
+func svg(_ path: CGPath, fill: String, opacity: CGFloat = 1) -> String {
+    let alpha = opacity < 1 ? " fill-opacity=\"\(fmt(opacity))\"" : ""
+    return """
+    <svg width="\(Int(canvas))" height="\(Int(canvas))" viewBox="0 0 \(Int(canvas)) \(Int(canvas))" xmlns="http://www.w3.org/2000/svg">
+    <path d="\(svgData(path))" fill="\(fill)"\(alpha) fill-rule="nonzero"/>
+    </svg>
+
+    """
+}
+
+let layers: [(file: String, svg: String)] = [
+    ("wedge.svg", svg(wedge, fill: ink, opacity: 0.35)),
+    ("ring.svg", svg(ring, fill: ink)),
+    ("core.svg", svg(core, fill: ink)),
+    ("dot.svg", svg(dot, fill: "#FFFFFF")),
+]
+
+// MARK: - icon.json
+
+func iconJSON(fill: String) -> String {
+    // Layers list top-first, as Icon Composer writes them.
+    """
+    {
+      "fill" : {
+        "solid" : "\(fill)"
+      },
+      "groups" : [
+        {
+          "blend-mode" : "normal",
+          "layers" : [
+            {
+              "blend-mode" : "normal",
+              "fill" : "automatic",
+              "glass" : true,
+              "hidden" : false,
+              "image-name" : "dot.svg",
+              "name" : "Dot"
+            },
+            {
+              "blend-mode" : "normal",
+              "fill" : "automatic",
+              "glass" : true,
+              "hidden" : false,
+              "image-name" : "core.svg",
+              "name" : "Core"
+            },
+            {
+              "blend-mode" : "normal",
+              "fill" : "automatic",
+              "glass" : true,
+              "hidden" : false,
+              "image-name" : "ring.svg",
+              "name" : "Ring"
+            },
+            {
+              "blend-mode" : "normal",
+              "fill" : "automatic",
+              "glass" : true,
+              "hidden" : false,
+              "image-name" : "wedge.svg",
+              "name" : "Wedge"
+            }
+          ],
+          "lighting" : "individual",
+          "name" : "Mark",
+          "shadow" : {
+            "kind" : "neutral",
+            "opacity" : 0.5
+          },
+          "specular" : true,
+          "translucency" : {
+            "enabled" : true,
+            "value" : 0.5
+          }
+        }
+      ],
+      "supported-platforms" : {
+        "circles" : [
+          "watchOS"
+        ],
+        "squares" : "shared"
+      }
+    }
+
+    """
+}
+
+// MARK: - Write
+
+let root = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent()
+let fm = FileManager.default
+for variant in variants {
+    let package = root.appendingPathComponent(variant.package, isDirectory: true)
+    let assets = package.appendingPathComponent("Assets", isDirectory: true)
+    try? fm.removeItem(at: package)
+    try fm.createDirectory(at: assets, withIntermediateDirectories: true)
+    try iconJSON(fill: variant.fill).write(to: package.appendingPathComponent("icon.json"), atomically: true, encoding: .utf8)
+    for layer in layers {
+        try layer.svg.write(to: assets.appendingPathComponent(layer.file), atomically: true, encoding: .utf8)
+    }
+    print("wrote \(variant.package)")
+}

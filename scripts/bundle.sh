@@ -16,11 +16,11 @@ VERSION="0.2.0"
 if [[ "${1:-}" == "--release" ]]; then
     APP_NAME="Crisp"
     BUNDLE_ID="com.noey.crisp"
-    ICON="assets/AppIcon.icns"
+    ICON="assets/AppIcon.icon"
 else
     APP_NAME="Crisp Dev"
     BUNDLE_ID="com.noey.crisp.dev"
-    ICON="assets/AppIcon-Dev.icns"
+    ICON="assets/AppIcon-Dev.icon"
 fi
 
 swift build -c release
@@ -34,9 +34,22 @@ cp .build/release/crispctl "$APP/Contents/MacOS/crispctl"
 cp .build/release/crisp-mcp "$APP/Contents/MacOS/crisp-mcp"
 # SwiftPM resource bundle (fonts, icons) — Bundle.module looks in Contents/Resources.
 cp -R .build/release/Crisp_Crisp.bundle "$APP/Contents/Resources/"
-if [[ -f "$ICON" ]]; then
-    cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
-fi
+# Compile the Icon Composer package (see scripts/GenerateIcon.swift) with
+# actool: Assets.car carries the Liquid Glass icon for macOS 26, and the
+# flattened AppIcon.icns is the fallback for macOS 14-15. actool names the
+# icon after the package, so it is staged as AppIcon.icon first.
+ICON_STAGE="build/icon"
+rm -rf "$ICON_STAGE"
+mkdir -p "$ICON_STAGE"
+cp -R "$ICON" "$ICON_STAGE/AppIcon.icon"
+xcrun actool "$ICON_STAGE/AppIcon.icon" \
+    --compile "$APP/Contents/Resources" \
+    --platform macosx --minimum-deployment-target 14.0 \
+    --app-icon AppIcon \
+    --output-partial-info-plist "$ICON_STAGE/AppIcon.plist" \
+    --output-format human-readable-text --errors --warnings
+[[ -f "$APP/Contents/Resources/Assets.car" && -f "$APP/Contents/Resources/AppIcon.icns" ]] \
+    || { echo "error: actool did not produce the app icon (Xcode 26 required)" >&2; exit 1; }
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,6 +65,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
