@@ -3,6 +3,7 @@ import Foundation
 
 public enum CrispAutomation {
     public static let notification = Notification.Name("com.noey.crisp.automation.request")
+    public static let backgroundLaunchArgument = "--automation-background"
 
     public static func directory(bundleIdentifier: String) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -384,7 +385,9 @@ public struct CrispAutomationClient {
         if running.isEmpty {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = ["-g", appURL.path]
+            process.arguments = [
+                "-g", appURL.path, "--args", CrispAutomation.backgroundLaunchArgument,
+            ]
             try process.run()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {

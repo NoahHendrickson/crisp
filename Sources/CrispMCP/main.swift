@@ -128,7 +128,7 @@ private final class Server {
                 "title": "List Crisp recording sources",
                 "description": "List the displays, native app windows, and Google Chrome tabs Crisp can currently record. Use this when the target is uncertain or a convenient selector was ambiguous.",
                 "inputSchema": emptySchema,
-                "annotations": readOnlyAnnotations,
+                "annotations": appLaunchingAnnotations,
             ],
             [
                 "name": "start_recording",
@@ -147,7 +147,7 @@ private final class Server {
                 "title": "Get Crisp recording status",
                 "description": "Report whether Crisp is idle, recording, or showing an error. Use this to diagnose uncertainty; do not start another recording when the state is recording.",
                 "inputSchema": emptySchema,
-                "annotations": readOnlyAnnotations,
+                "annotations": appLaunchingAnnotations,
             ],
             [
                 "name": "stop_recording",
@@ -164,11 +164,11 @@ private final class Server {
         ]
     }
 
-    private var readOnlyAnnotations: [String: Any] {
+    private var appLaunchingAnnotations: [String: Any] {
         [
-            "readOnlyHint": true,
+            "readOnlyHint": false,
             "destructiveHint": false,
-            "idempotentHint": true,
+            "idempotentHint": false,
             "openWorldHint": false,
         ]
     }

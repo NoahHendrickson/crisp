@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CrispAutomationProtocol
 
 @main
 enum Main {
@@ -43,7 +44,9 @@ struct CrispApp: App {
         AutomationServer.shared.start()
         // When run as a bare executable (swift run), behave like a regular app.
         NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        if !CommandLine.arguments.contains(CrispAutomation.backgroundLaunchArgument) {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
     }
 
     var body: some Scene {

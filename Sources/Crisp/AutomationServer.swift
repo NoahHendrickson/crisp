@@ -82,7 +82,10 @@ final class AutomationServer {
         } catch {
             response = AutomationResponse(
                 requestID: id,
-                result: .failure(message: error.localizedDescription, status: AppModel.shared.automationStatus)
+                result: .failure(
+                    message: error.localizedDescription,
+                    status: AppModel.shared.consumeAutomationStatus()
+                )
             )
         }
 
@@ -102,14 +105,16 @@ final class AutomationServer {
         let model = AppModel.shared
         switch request.command {
         case .status:
-            return AutomationResponse(requestID: request.id, result: .status(model.automationStatus))
+            return AutomationResponse(
+                requestID: request.id, result: .status(model.consumeAutomationStatus())
+            )
 
         case .sources:
             let snapshot = try await availableSources(includeChrome: true)
             return AutomationResponse(
                 requestID: request.id,
                 result: .sources(
-                    status: model.automationStatus,
+                    status: model.consumeAutomationStatus(),
                     sources: snapshot.items.map(\.info),
                     warnings: snapshot.warnings
                 )
@@ -136,16 +141,14 @@ final class AutomationServer {
             return AutomationResponse(
                 requestID: request.id,
                 result: .started(
-                    status: model.automationStatus,
+                    status: model.consumeAutomationStatus(),
                     recording: Self.recording(folder: folder)
                 )
             )
 
         case .stop:
             guard model.isRecording else {
-                throw CrispAutomationError.message(
-                    model.automationStatus.message ?? "Crisp is not recording."
-                )
+                throw CrispAutomationError.message("Crisp is not recording.")
             }
             guard let folder = await model.stopRecording() else {
                 throw CrispAutomationError.message(
@@ -156,7 +159,7 @@ final class AutomationServer {
             return AutomationResponse(
                 requestID: request.id,
                 result: .stopped(
-                    status: model.automationStatus,
+                    status: model.consumeAutomationStatus(),
                     recording: Self.recording(folder: folder)
                 )
             )
@@ -340,17 +343,25 @@ extension AppModel {
             return AutomationStatus(
                 state: .error,
                 message: message,
-                recordingFolder: lastRecordingOutcome?.error == nil
-                    ? nil : lastRecordingOutcome?.folder?.path
+                recordingFolder: lastRecordingOutcome?.error == message
+                    ? lastRecordingOutcome?.folder?.path : nil
             )
         case .idle:
             if let outcome = lastRecordingOutcome, let message = outcome.error {
                 return AutomationStatus(
-                    state: .error, message: message, recordingFolder: outcome.folder?.path
+                    state: .idle, message: message, recordingFolder: outcome.folder?.path
                 )
             }
             return AutomationStatus(state: .idle)
         }
+    }
+
+    /// Preserve a recording failure until an automation client observes it,
+    /// then retire it so a recovered idle app does not report stale errors.
+    func consumeAutomationStatus() -> AutomationStatus {
+        let status = automationStatus
+        clearLastRecordingFailure()
+        return status
     }
 }
 

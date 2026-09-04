@@ -594,6 +594,12 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    func clearLastRecordingFailure() {
+        if lastRecordingOutcome?.error != nil {
+            lastRecordingOutcome = nil
+        }
+    }
+
     private func startResolvedRecording(source: CaptureSource, codec: MasterCodec) async -> URL? {
         let folder: URL
         do {
@@ -709,7 +715,7 @@ final class AppModel: ObservableObject {
         }
         let masterExists = FileManager.default.fileExists(
             atPath: folder.appendingPathComponent("master.mov").path)
-        if let failure, failure as? CaptureEngine.CaptureError == .noFramesCaptured || !masterExists {
+        if !masterExists || failure as? CaptureEngine.CaptureError == .noFramesCaptured {
             // Nothing playable was captured (zero frames, or the writer died
             // and its file was discarded): don't leave a dead folder behind.
             try? FileManager.default.removeItem(at: folder)
