@@ -779,8 +779,8 @@ private struct ZoomStepTag: View {
 }
 
 /// Flat library row (Figma 173:4047): name (double-click to rename), the
-/// always-present Edit button with its hover-revealed 28pt actions, then a
-/// Body/12 line — "MOV 50.3MB" plus the zoom/step tag.
+/// emphatic Edit icon that expands to a label on hover (revealing the 28pt
+/// actions beside it), then a Body/12 line — "MOV 50.3MB" plus the zoom/step tag.
 private struct RecordingRow: View {
     @EnvironmentObject var model: AppModel
     let recording: Recording
@@ -818,7 +818,7 @@ private struct RecordingRow: View {
                 }
                 Spacer(minLength: 8)
                 // Fixed so a long name truncates instead of squeezing the
-                // Edit button's label.
+                // Edit button as it expands.
                 RecordingActionButtons(
                     recording: recording, showsSecondaryActions: hovering || renaming
                 )
@@ -826,7 +826,6 @@ private struct RecordingRow: View {
                 .layoutPriority(1)
             }
             .frame(height: 28)
-            .onHover { hovering = $0 }
 
             HStack(spacing: 8) {
                 Text(fileInfo(summary))
@@ -851,7 +850,9 @@ private struct RecordingRow: View {
                 .frame(height: 32)
             }
         }
-        .contentShape(Rectangle())
+        // Hover anywhere on the row, including the gutter around the
+        // divider, reveals the actions — no dead zone between rows.
+        .contentShape(Rectangle().inset(by: -8))
         .onHover { hovering = $0 }
     }
 
@@ -931,9 +932,9 @@ private struct RecordingRow: View {
     }
 }
 
-/// Row actions (Figma 173:4050): the emphatic Edit button always sits at the
-/// row's trailing edge; export / reveal / delete are ghost buttons that the
-/// row reveals to its left on hover.
+/// Row actions (Figma 173:4050): the emphatic Edit control sits at the
+/// row's trailing edge as a 28pt icon; hover grows it into the labeled
+/// button and reveals export / reveal / delete to its left.
 private struct RecordingActionButtons: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
@@ -942,45 +943,58 @@ private struct RecordingActionButtons: View {
 
     var body: some View {
         let exporting = model.exportProgress[recording.folder] != nil
+        let expanded = showsSecondaryActions
         HStack(spacing: 1) {
-            if showsSecondaryActions {
-                Button {
-                    model.export(recording)
-                } label: {
-                    Icon(name: "export-duotone", size: 16, fallback: "square.and.arrow.up")
+            // Grouped so the three slide out from behind Edit as one unit
+            // (and back under it on exit) instead of staggering apart.
+            if expanded {
+                HStack(spacing: 1) {
+                    Button {
+                        model.export(recording)
+                    } label: {
+                        Icon(name: "export-duotone", size: 16, fallback: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                    .disabled(exporting)
+                    .tooltip("Export with zooms as \(model.exportFormat.rawValue). Earlier exports are kept.")
+                    Button {
+                        model.reveal(recording)
+                    } label: {
+                        Icon(name: "folder-open-duotone", size: 16, fallback: "folder")
+                    }
+                    .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                    .tooltip("Reveal in Finder")
+                    Button {
+                        model.delete(recording)
+                    } label: {
+                        Icon(name: "trash-duotone", size: 16, fallback: "trash")
+                    }
+                    .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
+                    .tooltip("Move recording and all exports to Trash")
                 }
-                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
-                .disabled(exporting)
-                .tooltip("Export with zooms as \(model.exportFormat.rawValue). Earlier exports are kept.")
-                Button {
-                    model.reveal(recording)
-                } label: {
-                    Icon(name: "folder-open-duotone", size: 16, fallback: "folder")
-                }
-                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
-                .tooltip("Reveal in Finder")
-                Button {
-                    model.delete(recording)
-                } label: {
-                    Icon(name: "trash-duotone", size: 16, fallback: "trash")
-                }
-                .buttonStyle(.themed(.ghost, size: .sm, iconOnly: true))
-                .tooltip("Move recording and all exports to Trash")
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
             // Figma 173:4240: `--emphatic` fill, 10pt radius, 12pt brush.
+            // Collapsed is a square icon; hover grows the pill around the label.
             Button {
                 openWindow(value: recording.folder)
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: expanded ? 6 : 0) {
                     Icon(name: "paint-brush-household", size: 12, fallback: "paintbrush")
                     Text("Edit")
+                        .opacity(expanded ? 1 : 0)
+                        .frame(width: expanded ? nil : 0, alignment: .leading)
+                        .clipped()
                 }
             }
             .buttonStyle(.themed(
                 .primary, size: .sm, corners: .all(10),
-                leadingIcon: true, tint: Theme.emphatic
+                iconOnly: !expanded, leadingIcon: expanded,
+                tint: Theme.emphatic
             ))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .tooltip("Edit zooms")
         }
+        .animation(.smooth(duration: 0.22), value: expanded)
     }
 }
