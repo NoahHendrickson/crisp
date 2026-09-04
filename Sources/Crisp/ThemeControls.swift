@@ -182,6 +182,7 @@ struct ThemedButtonStyle: ButtonStyle {
                 .pointingHandCursor()
                 .onHover { hovering = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovering)
+                .animation(.smooth(duration: 0.22), value: style.iconOnly)
         }
 
         // button.tsx: default is monochrome (bg-foreground text-background,
