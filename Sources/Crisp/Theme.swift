@@ -53,7 +53,7 @@ enum Theme {
     /// Record button (Figma 43:5324) — the one saturated control.
     static let record = Color(hex: "#ff2d57")
     /// `--emphatic` (Figma 173:3873): the blue call-to-action fill behind the
-    /// library row's always-present Edit button.
+    /// library row's Edit button.
     static let emphatic = Color(hex: "#4580e5")
 
     // Raised surface: the progress track / indicator (progress.tsx). Light: muted + background; dark:

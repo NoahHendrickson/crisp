@@ -1005,9 +1005,8 @@ private struct RecordingActionButtons: View {
                 }
             }
             .buttonStyle(.themed(
-                .primary, size: .sm, corners: .all(10),
-                iconOnly: !expanded, leadingIcon: expanded,
-                tint: Theme.emphatic
+                .primary, size: .sm, iconOnly: !expanded, corners: .all(10),
+                leadingIcon: expanded, tint: Theme.emphatic
             ))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .tooltip("Edit zooms")
