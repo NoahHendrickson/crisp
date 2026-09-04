@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crisp Recorder"
+  short_description: "Record polished project and browser demos"
+  default_prompt: "Use $crisp-recorder to record this project or web view with Crisp."

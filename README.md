@@ -69,6 +69,76 @@ source (display/window/region) at 10 bits in Display P3 and saves a
 gradient banding comes from; these aren't. Crisp's own windows are excluded
 from display/region shots.
 
+## Using Crisp with coding agents
+
+Crisp bundles a local MCP server plus a `crispctl` command. Both list recordable
+sources, start and stop capture through the signed app, report status, and
+return structured artifact paths. An agent uses MCP to control the recording
+and computer use for the demonstration inside the selected app or browser. The
+reusable fallback workflow is in
+[`agent-skills/crisp-recorder`](agent-skills/crisp-recorder/SKILL.md).
+
+### MCP setup
+
+Point any client that supports local STDIO MCP servers at the executable inside
+Crisp.app:
+
+```json
+{
+  "mcpServers": {
+    "crisp": {
+      "command": "/Applications/Crisp.app/Contents/MacOS/crisp-mcp"
+    }
+  }
+}
+```
+
+For Codex, the equivalent one-time command is:
+
+```sh
+codex mcp add crisp -- /Applications/Crisp.app/Contents/MacOS/crisp-mcp
+```
+
+Once connected, the client discovers `list_sources`, `start_recording`,
+`get_recording_status`, and `stop_recording`. The server instructions tell the
+model to start Crisp before its computer-use actions and to stop cleanly after
+the demonstration. Screen Recording and Chrome Automation permissions still
+belong to the installed, signed Crisp app.
+
+### Skill and CLI fallback
+
+To make it available to Codex and ChatGPT from every project on this Mac:
+
+```sh
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/agent-skills/crisp-recorder" ~/.agents/skills/crisp-recorder
+```
+
+Then prompts such as “record a short demo of this local web app with Crisp”
+can trigger the skill automatically, or invoke it explicitly as
+`$crisp-recorder`.
+
+The control executable lives inside the app. Optionally expose it on your shell
+path under its canonical name:
+
+```sh
+ln -s /Applications/Crisp.app/Contents/MacOS/crispctl ~/.local/bin/crispctl
+```
+
+```sh
+crispctl sources --json
+crispctl start --chrome-url http://localhost:5173 --json
+crispctl status --json
+crispctl stop --json
+```
+
+`start` also accepts an exact ID from `sources` via `--source`, a native window
+via `--window`, or a display via `--display`. Add `--codec hevc10`,
+`prores422`, or `prores4444` when the default is not appropriate. The CLI
+launches the app if needed and communicates only through per-user files and
+macOS distributed notifications; capture remains inside the signed app process
+that owns Screen Recording permission.
+
 ## Installing
 
 **[Download the latest version →](https://noahhendrickson.github.io/crisp/)**
