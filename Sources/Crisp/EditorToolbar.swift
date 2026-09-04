@@ -537,17 +537,17 @@ extension EditorView {
 
     // MARK: - Zoom group
 
-    /// The "Zoom" group: the plus (or x) square starts a zoom at the
-    /// playhead / ends the open one — one cycle per zoom, like the pin and
-    /// the clip — and the steppers edit the level in effect there.
+    /// The "Zoom" group: the magnifying-glass (or x) square starts a zoom
+    /// at the playhead / ends the open one — one cycle per zoom, like the
+    /// pin and the clip — and the steppers edit the level in effect there.
     func zoomControl(level: (value: Binding<Double>, editable: Bool)) -> some View {
         let move = zoomMove
         return LevelStepper(
             level: level.value, range: Self.zoomRange,
             levelEnabled: level.editable, levelHelp: levelHelp,
             cycle: .init(
-                icon: move == .start ? "plus" : "x",
-                fallback: move == .start ? "plus" : "xmark",
+                icon: move == .start ? "magnifying-glass" : "x",
+                fallback: move == .start ? "magnifyingglass" : "xmark",
                 label: "\(move == .start ? "Start zoom at" : "End zoom at") \(shortTimecode(currentTime))",
                 active: move == .end, enabled: zoomMoveEnabled, help: zoomHelp
             ) {
@@ -567,7 +567,8 @@ extension EditorView {
     var pinControl: some View {
         let move = pinMove
         return cycleControl(
-            icon: move == .pin ? "plus" : "x", fallback: move == .pin ? "plus" : "xmark",
+            icon: move == .pin ? "map-pin-simple-area" : "x",
+            fallback: move == .pin ? "mappin.and.ellipse" : "xmark",
             captions: (start: "Pin viewport at", end: "Unpin viewport at"), active: move == .unpin,
             activeColor: Theme.pinBar, enabled: pinMoveEnabled, help: pinHelp
         ) {
@@ -783,13 +784,13 @@ extension EditorView {
     }
 }
 
-/// "[+]  Zoom  −  1.8×  +" (Figma 93:697): a muted group whose leading
-/// square starts a zoom at the playhead (an x ends the open one) and
-/// whose level sits in a well between two 12pt steppers, in tenths, clamped
-/// to the editor's range. The square and the steppers enable on their own —
-/// the square wherever a zoom could start or end, the steppers only inside
-/// a hold. When the toolbar is tight, the word "Zoom" becomes a magnifying
-/// glass.
+/// "[magnifying glass]  Zoom  −  1.8×  +" (Figma 93:697): a muted group
+/// whose leading square starts a zoom at the playhead (an x ends the open
+/// one) and whose level sits in a well between two 12pt steppers, in
+/// tenths, clamped to the editor's range. The square and the steppers
+/// enable on their own — the square wherever a zoom could start or end,
+/// the steppers only inside a hold. When the toolbar is tight, the word
+/// "Zoom" drops and the square stands in for it.
 struct LevelStepper: View {
     /// The start/end action on the group's leading square; `active` while
     /// a zoom is open, lighting the square primary until the end is picked.
@@ -836,12 +837,7 @@ struct LevelStepper: View {
 
     @ViewBuilder
     private func zoomCaption(compact: Bool) -> some View {
-        if compact {
-            Icon(name: "magnifying-glass", size: 16, fallback: "magnifyingglass")
-                .foregroundStyle(Theme.mutedForeground)
-                .padding(.horizontal, 8)
-                .accessibilityLabel("Zoom")
-        } else {
+        if !compact {
             Text("Zoom")
                 .font(Theme.font(.label12))
                 .foregroundStyle(Theme.mutedForeground)
