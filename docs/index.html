@@ -241,9 +241,7 @@
     .setup-step p { margin: 16px 0 0; color: var(--muted); }
     .setup-step strong { color: var(--ink); font-weight: 600; }
     .setup-step a, .setup-help a { text-underline-offset: 3px; }
-    .setup-help { margin-top: 36px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper-raised); padding: 24px; }
-    .setup-help p { margin: 0; color: var(--muted); }
-    .setup-help p + p { margin-top: 12px; }
+    .setup-help { margin: 28px 0 0; color: var(--muted); font-size: 14px; }
 
     .download-section { padding: 0 0 32px; }
     .download-card { position: relative; overflow: hidden; border-radius: var(--radius-lg); background: #dff1fd; padding: 82px 76px; }
@@ -398,35 +396,21 @@
 
     <section class="section setup" id="install" aria-labelledby="install-heading">
       <div class="shell">
-        <h2 id="install-heading">Get up and recording.</h2>
-        <p class="section-lead">Crisp requires macOS 14 Sonoma or later on Apple silicon. We don’t have an Apple Developer account yet, so Crisp isn’t signed with an Apple Developer ID or notarized by Apple. You’ll need to approve it in macOS before the first launch.</p>
+        <h2 id="install-heading">Install Crisp.</h2>
+        <p class="section-lead">Crisp isn’t notarized by Apple yet, so macOS needs your approval the first time you open it.</p>
 
         <ol class="setup-grid" role="list">
           <li class="setup-step">
-            <h3>Download and move to Applications</h3>
-            <p><a class="download-link" href="https://github.com/NoahHendrickson/crisp/releases/latest">Download the latest Crisp ZIP</a>, double-click it to unzip, then drag <strong>Crisp.app</strong> into <strong>Applications</strong>. If you land on GitHub, choose the <strong>Crisp ZIP under Assets</strong>, rather than a source-code archive.</p>
+            <h3>Download and install</h3>
+            <p><a class="download-link" href="https://github.com/NoahHendrickson/crisp/releases/latest">Download the Crisp ZIP</a>, unzip it, and drag <strong>Crisp.app</strong> into <strong>Applications</strong>.</p>
           </li>
           <li class="setup-step">
-            <h3>Allow the first launch</h3>
-            <p>Open Crisp from Applications once. If macOS says the developer can’t be verified or Apple can’t check the app, dismiss the alert without moving Crisp to the Trash.</p>
-            <p>Go to <strong>System Settings → Privacy &amp; Security</strong>, scroll to the message about Crisp, and click <strong>Open Anyway</strong>. Confirm with <strong>Open</strong> and authenticate if asked. Only approve the copy you downloaded from this project’s GitHub release.</p>
-          </li>
-          <li class="setup-step">
-            <h3>Grant Screen Recording access</h3>
-            <p>In Crisp, click <strong>Grant Access…</strong>. In <strong>System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording</strong> (called <strong>Screen Recording</strong> on some macOS versions), turn Crisp on.</p>
-            <p>If macOS asks you to quit and reopen, do so. Otherwise return to Crisp and click <strong>Check Again</strong>; use <strong>Relaunch Crisp</strong> if the permission hasn’t taken effect.</p>
-          </li>
-          <li class="setup-step">
-            <h3>Make your first recording</h3>
-            <p>Choose a display, app window, Chrome tab, or region, then click <strong>Record</strong>. Crisp hides while you record. When you’re finished, bring Crisp forward from the Dock and click <strong>Stop Recording</strong>.</p>
-            <p>Select the take in your library, open <strong>Edit zooms</strong> to adjust the camera moves, then export your video. Your recordings are saved in your home folder under <strong>Movies → Crisp</strong>.</p>
+            <h3>Approve the first launch</h3>
+            <p>Open Crisp. If macOS blocks it, dismiss the alert, then go to <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>. Confirm with <strong>Open</strong>.</p>
           </li>
         </ol>
 
-        <div class="setup-help">
-          <p><strong>Recording a Chrome tab?</strong> Allow Crisp to control Google Chrome when prompted (Privacy &amp; Security → Automation). Enable Crisp under Accessibility to crop to just the page; without it, the recording includes Chrome’s toolbar and tab strip.</p>
-          <p><strong>Need help opening Crisp?</strong> Follow <a href="https://support.apple.com/en-us/102445">Apple’s guide to opening apps from an unidentified developer</a>. If you still can’t open it, <a href="https://github.com/NoahHendrickson/crisp/issues/new">report the exact macOS message</a>.</p>
-        </div>
+        <p class="setup-help">Need help? <a href="https://support.apple.com/en-us/102445">See Apple’s first-launch guide</a>.</p>
       </div>
     </section>
 
