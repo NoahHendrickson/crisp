@@ -82,7 +82,8 @@ enum AgentTools {
               zoomed crop, cursor and click ripples. Look at it to judge framing.
           validate [plan.json]
               Check the plan against the app's rules and print the derived timing of
-              every zoom and step. Exit status 1 when anything had to be changed.
+              every zoom and step (with how much each pans), then the plan's rhythm
+              against the brief's targets. Exit status 1 when anything had to be changed.
           path [from] [to] [--step 0.1] [--plan plan.json]
               Print the camera over time under the plan (t, zoom, centre, speed):
               where the follower looks, as numbers.
@@ -208,6 +209,7 @@ enum AgentTools {
                 )
             }
             print(AgentPlan.describe(parsed.segments, planner: planner, duration: duration))
+            print(AgentPlan.rhythm(of: parsed.segments, meta: meta, duration: duration))
             if parsed.issues.isEmpty {
                 print("OK — \(parsed.segments.count) zoom(s), \(parsed.segments.reduce(0) { $0 + $1.steps.count }) step(s); the plan applies exactly as written.")
                 return 0
@@ -265,36 +267,120 @@ enum AgentTools {
         }
     }
 
-    /// The stills handed over with each turn: a wide establishing shot, each
-    /// zoom's hold opening, click bursts no zoom covers, and each step once
-    /// it has eased in — in that priority, capped at 12, annotated. Replaces
-    /// the previous turn's set entirely.
+    /// One still an agent should see: when and why. Lower `priority` wins a
+    /// place first when there are more moments than `maxFrames`.
+    struct FrameMoment: Equatable {
+        var t: Double
+        var label: String
+        var priority: Int
+    }
+
+    /// The most stills handed over with one turn.
+    static let maxFrames = 16
+    /// A stretch longer than this gets a still this often inside it, so a
+    /// long spell of activity is seen throughout, not only where it began.
+    static let stretchStillInterval = 30.0
+
+    /// Which moments to hand over as stills: one per stretch of activity
+    /// (and one every `stretchStillInterval` inside a long stretch), then a
+    /// wide establishing shot, then zoom openings, click bursts no zoom
+    /// covers, and steps that fall away from a still already chosen, in that
+    /// order, until `maxFrames`. Every band is thinned *evenly across the
+    /// runtime* when it has more moments than places, so a long recording
+    /// is never seen only at its start. Sorted by time.
+    static func frameMoments(meta: RecordingMeta, segments: [ZoomSegment], duration: Double) -> [FrameMoment] {
+        let planner = ZoomPlanner(meta: meta)
+        func clamp(_ t: Double) -> Double { min(max(0, t), max(0, duration - 0.05)) }
+        var chosen: [FrameMoment] = []
+        func add(_ moment: FrameMoment) {
+            guard chosen.count < maxFrames, !chosen.contains(where: { abs($0.t - moment.t) < 0.75 }) else { return }
+            chosen.append(moment)
+        }
+        // Fill the free places evenly from `moments`; a pick that lands on a
+        // still already chosen is skipped and its place offered to the rest.
+        func addEvenly(_ moments: [FrameMoment]) {
+            var pool = moments
+            while chosen.count < maxFrames, !pool.isEmpty {
+                let picked = evenly(pool, count: maxFrames - chosen.count)
+                for moment in picked { add(moment) }
+                pool.removeAll { moment in picked.contains(moment) }
+            }
+        }
+        func zoomsCovering(_ from: Double, _ to: Double) -> [String] {
+            segments.enumerated().filter { $0.element.start <= to && from <= $0.element.end }.map { String($0.offset + 1) }
+        }
+        func coverage(_ zooms: [String]) -> String {
+            zooms.isEmpty ? "no zoom covers it"
+                : "zoom\(zooms.count == 1 ? "" : "s") \(zooms.joined(separator: ", ")) cover\(zooms.count == 1 ? "s" : "") it"
+        }
+
+        let stretches = planner.clickClusters(meta.events, gap: planner.config.stretchGap)
+        var perStretch: [FrameMoment] = []
+        for (i, stretch) in stretches.enumerated() {
+            let length = stretch.end - stretch.start
+            perStretch.append(FrameMoment(
+                t: clamp(stretch.start + 0.05),
+                label: String(format: "stretch %d of %d: %d click(s) over %.1fs — %@",
+                              i + 1, stretches.count, stretch.count, length, coverage(zoomsCovering(stretch.start, stretch.end))),
+                priority: 1
+            ))
+            var inside = stretch.start + stretchStillInterval
+            while inside < stretch.end - stretchStillInterval / 2 {
+                perStretch.append(FrameMoment(
+                    t: clamp(inside),
+                    label: String(format: "inside stretch %d of %d, %.0fs in of %.0fs — %@",
+                                  i + 1, stretches.count, inside - stretch.start, length, coverage(zoomsCovering(inside, inside))),
+                    priority: 1
+                ))
+                inside += stretchStillInterval
+            }
+        }
+        addEvenly(perStretch)
+        add(FrameMoment(t: min(0.5, duration / 2), label: "wide establishing shot", priority: 0))
+
+        var rest: [FrameMoment] = []
+        for (i, seg) in segments.enumerated() {
+            rest.append(FrameMoment(t: clamp(seg.start + 0.1), label: String(format: "zoom %d hold opens (%.2fs)", i + 1, seg.start), priority: 2))
+            for step in seg.steps.sorted(by: { $0.t < $1.t }) {
+                let window = planner.stepWindow(step, in: seg, duration: duration)
+                rest.append(FrameMoment(t: window.end, label: String(format: "zoom %d steps to %.1f× (%.2fs)", i + 1, step.zoom, window.end), priority: 4))
+            }
+        }
+        for cluster in planner.clickClusters(meta.events)
+        where !segments.contains(where: { $0.start - 0.5 <= cluster.start && cluster.end <= $0.end + 0.5 }) {
+            rest.append(FrameMoment(t: clamp(cluster.start + 0.05), label: String(format: "%d click(s) at %.2fs — no zoom covers them", cluster.count, cluster.start), priority: 3))
+        }
+        for band in [2, 3, 4] {
+            addEvenly(rest.filter { $0.priority == band }.sorted { $0.t < $1.t })
+        }
+        return chosen.sorted { $0.t < $1.t }
+    }
+
+    /// At most `count` of `items`, spread evenly over the list (first and
+    /// last kept) — the whole list when it fits.
+    static func evenly<T>(_ items: [T], count: Int) -> [T] {
+        guard count > 0 else { return [] }
+        guard items.count > count else { return items }
+        guard count > 1 else { return [items[items.count / 2]] }
+        var picked: [T] = []
+        var last = -1
+        for i in 0..<count {
+            let index = Int((Double(i) * Double(items.count - 1) / Double(count - 1)).rounded())
+            if index != last { picked.append(items[index]) }
+            last = index
+        }
+        return picked
+    }
+
+    /// The stills handed over with each turn — the `frameMoments`, annotated.
+    /// Replaces the previous turn's set entirely.
     static func extractFrames(
         recording: Recording, meta: RecordingMeta, segments: [ZoomSegment], duration: Double,
         into workspace: URL
     ) async throws -> [AgentPlan.Frame] {
         clearStills(in: workspace)
         let planner = ZoomPlanner(meta: meta)
-        var wanted: [(t: Double, label: String, priority: Int)] = [
-            (min(0.5, duration / 2), "wide establishing shot", 0),
-        ]
-        for (i, seg) in segments.enumerated() {
-            wanted.append((min(seg.start + 0.1, max(0, duration - 0.05)),
-                           String(format: "zoom %d hold opens (%.2fs)", i + 1, seg.start), 1))
-            for step in seg.steps.sorted(by: { $0.t < $1.t }) {
-                let window = planner.stepWindow(step, in: seg, duration: duration)
-                wanted.append((window.end, String(format: "zoom %d steps to %.1f× (%.2fs)", i + 1, step.zoom, window.end), 3))
-            }
-        }
-        for cluster in planner.clickClusters(meta.events)
-        where !segments.contains(where: { $0.start - 0.5 <= cluster.start && cluster.end <= $0.end + 0.5 }) {
-            wanted.append((min(cluster.start + 0.05, max(0, duration - 0.05)),
-                           String(format: "%d click(s) at %.2fs — no zoom covers them", cluster.count, cluster.start), 2))
-        }
-        let chosen = wanted
-            .sorted { ($0.priority, $0.t) < ($1.priority, $1.t) }
-            .prefix(12)
-            .sorted { $0.t < $1.t }
+        let chosen = frameMoments(meta: meta, segments: segments, duration: duration)
 
         let keys = planner.keyframes(from: segments, duration: duration)
         var frames: [AgentPlan.Frame] = []

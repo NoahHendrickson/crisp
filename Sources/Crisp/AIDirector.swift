@@ -505,18 +505,27 @@ enum AIDirector {
         return """
         Polish the camera plan for this screen recording. Your full brief is AGENTS.md / \
         CLAUDE.md in this directory (\(workspace.path)) — read it first if it hasn't been \
-        loaded for you. In short: context.json holds the video info, clicks, cursor path and \
-        the current plan; the annotated stills below show what was on screen; ./crisp gives \
-        you more frames, previews of your plan through the real camera, and a validator.
+        loaded for you. In short: context.json opens with a summary of the recording's pace \
+        and how much of it the current plan zooms, then the stretches of activity to decide \
+        zooms over, then every click, the cursor path and the current plan with how much \
+        each zoom pans; the annotated stills below show what was on screen across the whole \
+        recording; ./crisp gives you more frames, previews of your plan through the real \
+        camera, and a validator that also reports the plan's rhythm.
+
+        The automatic plan you start from over-covers on purpose. Check the summary first: \
+        on a busy or hectic recording, or one zoomed for much more than a third of its \
+        runtime, your main work is choosing the few moments that earn a zoom and letting \
+        the rest play at full frame — not tidying every zoom that is there.
 
         Frames (video pixels on the grid; green box = what the current plan shows):
         \(frameList)
 
         \(userNote)
 
-        Overwrite plan.json with your polished plan, run ./crisp validate until it prints OK, \
-        preview the moments you changed with ./crisp preview and adjust any level that shows \
-        too little or too much, then reply in 2–4 plain sentences about what you changed and why.
+        Overwrite plan.json with your polished plan, run ./crisp validate until it prints OK \
+        and the rhythm line is within the brief's targets, preview the moments you changed \
+        with ./crisp preview and adjust any level that shows too little or too much, then \
+        reply in 2–4 plain sentences about what you changed and why.
         """
     }
 

@@ -15,6 +15,30 @@ enum AgentPlan {
     static let minGap = ZoomPlanner.minGap
     static let easeRange: ClosedRange<Double> = 0.1...8
 
+    // MARK: - Rhythm
+
+    /// The editorial targets the brief holds the agent to, and the summary
+    /// measures the plan against. Not rules — the validator never enforces
+    /// them — but the numbers the brief quotes, kept here so they agree.
+
+    /// Full frame between two zooms shorter than this reads as one run of
+    /// zooms, not two shots.
+    static let breathSeconds = 3.0
+    /// The follower moving more than this many visible widths per second of
+    /// hold is a camera chasing the cursor, not a shot. (A calm real hold
+    /// measures 0.00–0.10; the follower's own speed cap is 1.6.)
+    static let panChurnLimit = 0.25
+    /// The share of the runtime a plan should zoom, at most.
+    static let zoomedPercentTarget = 35.0
+    /// Clicks per minute below which a recording is "calm", and at or above
+    /// which it is "hectic"; "busy" in between.
+    static let calmClicksPerMinute = 6.0
+    static let hecticClicksPerMinute = 15.0
+
+    static func pace(clicksPerMinute: Double) -> String {
+        clicksPerMinute < calmClicksPerMinute ? "calm" : (clicksPerMinute < hecticClicksPerMinute ? "busy" : "hectic")
+    }
+
     // MARK: - Plan document
 
     /// `plan.json` as the agent writes it. Ids are kept so unchanged zooms
@@ -274,9 +298,14 @@ enum AgentPlan {
     /// Human-readable derived timing of a plan, as `./crisp validate` prints it.
     static func describe(_ segments: [ZoomSegment], planner: ZoomPlanner, duration: Double) -> String {
         guard !segments.isEmpty else { return "(no zooms — the whole video plays at full frame)" }
+        let keys = planner.keyframes(from: segments, duration: duration)
         var lines: [String] = []
         for (index, seg) in segments.enumerated() {
             let span = planner.motionSpan(for: seg, duration: duration)
+            let pan = planner.panTravel(for: seg, keys: keys, duration: duration)
+            let panning = pan.perSecond > panChurnLimit
+                ? String(format: " | PANS %.2f widths/s — the camera chases the cursor here", pan.perSecond)
+                : String(format: " | pans %.2f widths/s", pan.perSecond)
             let windows = planner.pinWindows(for: seg, duration: duration)
             let framing: String
             if windows.isEmpty {
@@ -292,8 +321,8 @@ enum AgentPlan {
                 framing = " | " + parts.joined(separator: ", ") + ", follows cursor otherwise"
             }
             lines.append(String(
-                format: "zoom %d: camera moves %.2fs → fully zoomed %.2fs (hold opens %.2fs) → hold ends %.2fs → full frame by %.2fs | %.2f×%@",
-                index + 1, span.moveStart, span.arrive, seg.start, span.end, span.outEnd, seg.zoom, framing
+                format: "zoom %d: camera moves %.2fs → fully zoomed %.2fs (hold opens %.2fs) → hold ends %.2fs → full frame by %.2fs | %.2f×%@%@",
+                index + 1, span.moveStart, span.arrive, seg.start, span.end, span.outEnd, seg.zoom, framing, panning
             ))
             for step in planner.holdSteps(for: seg, duration: duration) {
                 let window = planner.stepWindow(step, in: seg, duration: duration)
@@ -308,10 +337,32 @@ enum AgentPlan {
 
     // MARK: - Context document
 
-    /// `context.json`: the recording as data — clicks, drags, the planner's
-    /// click clusters, a coarse cursor path — with the current plan, its
-    /// derived timing, the rules, and the tools and stills on hand.
+    /// `context.json`: the recording as data — a summary of its pace and how
+    /// much of it the plan zooms, the stretches of activity an editor thinks
+    /// in, every click and drag, the planner's finer click clusters, a coarse
+    /// cursor path — with the current plan, its derived timing (including how
+    /// much each zoom pans), the rules, and the tools and stills on hand.
     struct Context: Encodable {
+        /// The numbers that say at a glance whether this recording is busy
+        /// and whether the plan is over-zoomed. Listed first in the file.
+        struct Summary: Encodable {
+            var durationSeconds: Double
+            var clicks: Int
+            var clicksPerMinute: Double
+            /// "calm", "busy" or "hectic" from `clicksPerMinute` — see the brief.
+            var pace: String
+            var clicksByMinute: [Int]
+            var drags: Int
+            var stretches: Int
+            var stretchesWithoutZoom: Int
+            var zooms: Int
+            var zoomedSeconds: Double
+            var zoomedPercent: Double
+            /// The most zooms in a row with less than a breath of full frame
+            /// between them.
+            var longestRunOfZooms: Int
+            var zoomsThatPan: Int
+        }
         struct Video: Encodable {
             var durationSeconds: Double
             var pixelWidth: Int
@@ -336,12 +387,36 @@ enum AgentPlan {
             var endX: Double
             var endY: Double
         }
+        /// A run of clusters with less than `stretchGap` between them: one
+        /// task the user was doing, the unit to decide zooms over.
+        struct Stretch: Encodable {
+            var start: Double
+            var end: Double
+            var durationSeconds: Double
+            var clicks: Int
+            var drags: Int
+            var centerX: Double
+            var centerY: Double
+            /// The box the clicks span, in video pixels.
+            var spreadWidth: Double
+            var spreadHeight: Double
+            /// The tightest level that still shows every click of the stretch
+            /// without the follower panning; null when even the loosest
+            /// level would have to pan.
+            var maxZoomWithoutPanning: Double?
+            /// "focused" when `maxZoomWithoutPanning` is set, else "spread".
+            var kind: String
+            /// 1-based indexes of the zooms whose holds overlap it.
+            var coveredByZooms: [Int]
+        }
         struct Cluster: Encodable {
             var start: Double
             var end: Double
             var count: Int
             var centerX: Double
             var centerY: Double
+            var spreadWidth: Double
+            var spreadHeight: Double
             /// 1-based index of the zoom whose hold covers it, if any.
             var coveredByZoom: Int?
         }
@@ -360,6 +435,12 @@ enum AgentPlan {
             var fullyZoomed: Double
             var holdEnds: Double
             var backAtFullFrame: Double
+            var holdSeconds: Double
+            var clicksCovered: Int
+            /// How far the follower moves during the hold, in visible widths
+            /// (a width at the level in effect) — and per second of hold.
+            var panWidths: Double
+            var panWidthsPerSecond: Double
             var steps: [StepTiming]
         }
         struct Constraints: Encodable {
@@ -367,6 +448,8 @@ enum AgentPlan {
             var zoomMax: Double
             var minHoldSeconds: Double
             var minGapBetweenZoomsSeconds: Double
+            var clusterGapSeconds: Double
+            var stretchGapSeconds: Double
             var leadInSeconds: Double
             var zoomInSeconds: Double
             var zoomOutSeconds: Double
@@ -374,7 +457,9 @@ enum AgentPlan {
             var visibleArea: String
         }
 
+        var summary: Summary
         var video: Video
+        var stretches: [Stretch]
         var clicks: [Click]
         var drags: [Drag]
         var clickClusters: [Cluster]
@@ -423,8 +508,24 @@ enum AgentPlan {
             Context.Cluster(
                 start: round2(cluster.start), end: round2(cluster.end), count: cluster.count,
                 centerX: round2(cluster.center.x), centerY: round2(cluster.center.y),
+                spreadWidth: cluster.bounds.width.rounded(), spreadHeight: cluster.bounds.height.rounded(),
                 coveredByZoom: segments.firstIndex { $0.start - 0.5 <= cluster.start && cluster.end <= $0.end + 0.5 }
                     .map { $0 + 1 }
+            )
+        }
+
+        let stretches = planner.clickClusters(meta.events, gap: planner.config.stretchGap).map { stretch in
+            let fit = planner.maxZoomWithoutPanning(over: stretch.bounds)
+            return Context.Stretch(
+                start: round2(stretch.start), end: round2(stretch.end),
+                durationSeconds: round2(stretch.end - stretch.start), clicks: stretch.count,
+                drags: drags.filter { $0.startT >= stretch.start - 0.01 && $0.startT <= stretch.end + 0.01 }.count,
+                centerX: round2(stretch.center.x), centerY: round2(stretch.center.y),
+                spreadWidth: stretch.bounds.width.rounded(), spreadHeight: stretch.bounds.height.rounded(),
+                maxZoomWithoutPanning: fit.map(round2), kind: fit == nil ? "spread" : "focused",
+                coveredByZooms: segments.enumerated()
+                    .filter { $0.element.start <= stretch.end && stretch.start <= $0.element.end }
+                    .map { $0.offset + 1 }
             )
         }
 
@@ -439,12 +540,17 @@ enum AgentPlan {
             t += step
         }
 
+        let keys = planner.keyframes(from: segments, duration: duration)
         let timing = segments.enumerated().map { index, seg -> Context.Timing in
             let span = planner.motionSpan(for: seg, duration: duration)
+            let pan = planner.panTravel(for: seg, keys: keys, duration: duration)
             return Context.Timing(
                 zoom: index + 1,
                 cameraStartsMoving: round2(span.moveStart), fullyZoomed: round2(span.arrive),
                 holdEnds: round2(span.end), backAtFullFrame: round2(span.outEnd),
+                holdSeconds: round2(span.end - seg.start),
+                clicksCovered: clicks.filter { $0.t >= seg.start && $0.t <= span.end }.count,
+                panWidths: round2(pan.widths), panWidthsPerSecond: round2(pan.perSecond),
                 steps: seg.steps.sorted { $0.t < $1.t }.map { step in
                     let window = planner.stepWindow(step, in: seg, duration: duration)
                     return Context.Timing.StepTiming(startsEasing: round2(window.start), atLevel: round2(window.end), zoom: round2(step.zoom))
@@ -453,13 +559,36 @@ enum AgentPlan {
         }
 
         let config = planner.config
+        let zoomed = timing.reduce(0.0) { $0 + max(0, $1.backAtFullFrame - $1.cameraStartsMoving) }
+        var longestRun = 0
+        var run = 0
+        for (index, seg) in segments.enumerated() {
+            run = index > 0 && seg.start - segments[index - 1].end < breathSeconds ? run + 1 : 1
+            longestRun = max(longestRun, run)
+        }
+        let perMinute = duration > 0 ? Double(clicks.count) / duration * 60 : 0
+        let summary = Context.Summary(
+            durationSeconds: round2(duration), clicks: clicks.count, clicksPerMinute: round2(perMinute),
+            pace: pace(clicksPerMinute: perMinute),
+            clicksByMinute: (0..<max(1, Int((duration / 60).rounded(.up)))).map { minute in
+                clicks.filter { Int($0.t / 60) == minute }.count
+            },
+            drags: drags.count, stretches: stretches.count,
+            stretchesWithoutZoom: stretches.filter { $0.coveredByZooms.isEmpty }.count,
+            zooms: segments.count, zoomedSeconds: round2(min(zoomed, duration)),
+            zoomedPercent: duration > 0 ? (min(zoomed, duration) / duration * 100).rounded() : 0,
+            longestRunOfZooms: longestRun,
+            zoomsThatPan: timing.filter { $0.panWidthsPerSecond > panChurnLimit }.count
+        )
         return Context(
+            summary: summary,
             video: Context.Video(
                 durationSeconds: round2(duration), pixelWidth: meta.pixelWidth, pixelHeight: meta.pixelHeight,
                 fps: meta.fps, scaleFactor: meta.scaleFactor, source: meta.source ?? "display",
                 recordedAt: ISO8601DateFormatter().string(from: meta.startedAt),
                 coordinates: "video pixels, origin top-left, y down"
             ),
+            stretches: stretches,
             clicks: clicks,
             drags: drags,
             clickClusters: clusters,
@@ -469,6 +598,7 @@ enum AgentPlan {
             constraints: Context.Constraints(
                 zoomMin: zoomRange.lowerBound, zoomMax: zoomRange.upperBound,
                 minHoldSeconds: minHold, minGapBetweenZoomsSeconds: minGap,
+                clusterGapSeconds: config.clusterGap, stretchGapSeconds: config.stretchGap,
                 leadInSeconds: config.leadIn, zoomInSeconds: config.zoomInDuration,
                 zoomOutSeconds: config.zoomOutDuration, stepEaseSeconds: config.stepDuration,
                 visibleArea: "pixelWidth/zoom × pixelHeight/zoom, centred by the follower on the cursor and clicks, clamped inside the frame"
@@ -484,6 +614,30 @@ enum AgentPlan {
         try encoder.encode(context(meta: meta, duration: duration, segments: segments, frames: frames))
     }
 
+    // MARK: - Rhythm line
+
+    /// The plan against the brief's rhythm targets, as `./crisp validate`
+    /// prints it after the timing — the same numbers as `summary`.
+    static func rhythm(of segments: [ZoomSegment], meta: RecordingMeta, duration: Double) -> String {
+        let s = context(meta: meta, duration: duration, segments: segments, frames: []).summary
+        var over: [String] = []
+        if s.zoomedPercent > zoomedPercentTarget {
+            over.append(String(format: "zoomed %.0f%% of the runtime, target at most %.0f%%", s.zoomedPercent, zoomedPercentTarget))
+        }
+        if s.longestRunOfZooms > 3 {
+            over.append(String(format: "%d zooms back-to-back with under %.0fs of full frame between them", s.longestRunOfZooms, breathSeconds))
+        }
+        if s.zoomsThatPan > 0 {
+            over.append(String(format: "%d zoom(s) pan more than %.1f widths/s", s.zoomsThatPan, panChurnLimit))
+        }
+        let line = String(
+            format: "Rhythm: %@ recording (%.1f clicks/min, %d stretch(es)); %d zoom(s) covering %d stretch(es); zoomed %.0f%% of %.0fs; longest run %d.",
+            s.pace, s.clicksPerMinute, s.stretches, s.zooms, s.stretches - s.stretchesWithoutZoom,
+            s.zoomedPercent, s.durationSeconds, s.longestRunOfZooms
+        )
+        return over.isEmpty ? line + " Within the brief's targets." : line + "\n  OVER TARGET: " + over.joined(separator: "; ")
+    }
+
     // MARK: - Briefing
 
     /// The standing brief every agent gets (CLAUDE.md / AGENTS.md in its workspace).
@@ -493,6 +647,13 @@ enum AgentPlan {
         let zoomIn = String(format: "%.2f", config.zoomInDuration)
         let zoomOut = String(format: "%.2f", config.zoomOutDuration)
         let stepEase = String(format: "%.1f", config.stepDuration)
+        let clusterGap = String(format: "%.1f", config.clusterGap)
+        let stretchGap = String(format: "%.0f", config.stretchGap)
+        let breath = String(format: "%.0f", breathSeconds)
+        let churn = String(format: "%.1f", panChurnLimit)
+        let zoomedTarget = String(format: "%.0f", zoomedPercentTarget)
+        let calm = String(format: "%.0f", calmClicksPerMinute)
+        let hectic = String(format: "%.0f", hecticClicksPerMinute)
         return """
     # Crisp AI editor — director's brief
 
@@ -500,27 +661,50 @@ enum AgentPlan {
     screen and every click, then plays it back through a virtual camera that zooms into the
     action. **Framing is automatic**: while zoomed, the camera follows the recorded cursor
     and recentres on clicks by itself (with a dead zone, a little look-ahead and a damped
-    ease, so it never chases jitter). Your job is the part that needs judgement — **when**
-    to be zoomed and **how far** — as an editorial pass over an automatic plan that is
-    competent but unpolished. You are not re-authoring from scratch unless the user asks.
+    ease, so it never chases jitter). Your job is the part that needs judgement — **which
+    moments earn a zoom, when, and how far**.
+
+    You start from an automatic plan that **over-covers on purpose**: every burst of clicks
+    (clicks less than \(clusterGap) s apart) gets its own zoom, so nothing is missed. On a short,
+    calm recording that draft is nearly right and you are polishing it. On a long or busy
+    one it is far too much — a zoom every few seconds, the camera forever diving in and
+    pulling back — and your main work is choosing the few moments that deserve emphasis
+    and letting everything else play at full frame. Emphasis means nothing if everything
+    is emphasised. `summary` in `context.json` tells you which situation you are in.
 
     ## What is in this directory
 
-    - `context.json` — everything known about the video: size, duration, every click and
-      drag, click clusters (the actions the automatic plan reasoned about), a
-      sampled cursor path, the current plan, its derived timing, and the rules below as data.
-    - `frame_N.jpg` — annotated stills: a coordinate grid in video pixels, rings on the
-      clicks within ±1.5 s (with times), a blue dot for the cursor, and a green rectangle
-      showing what the current plan's camera sees at that moment. Look at all of them.
+    - `context.json` — everything known about the video, in the order to read it:
+      - `summary` — the pace (`clicksPerMinute`, and `pace`: `calm` under \(calm)/min, `hectic`
+        from \(hectic)/min, `busy` between), `clicksByMinute`, and how much the current plan
+        zooms: `zooms`, `zoomedPercent` of the runtime, `longestRunOfZooms` back-to-back,
+        `zoomsThatPan`. Read this first: it says whether you are polishing or pruning.
+      - `stretches` — the recording cut into tasks: runs of clicks with less than \(stretchGap) s
+        between them, each with its duration, click and drag counts, the box its clicks
+        span (`spreadWidth` × `spreadHeight`), `maxZoomWithoutPanning` — the tightest level
+        that shows every click of the stretch without the follower moving — and `kind`:
+        `focused` fits in one shot, `spread` cannot be held without panning. Decide zooms
+        stretch by stretch; `coveredByZooms` says what the current plan does with each.
+      - every `click` and `drag`, the finer `clickClusters` the automatic plan gave a zoom
+        each, and a sampled `cursorPath`;
+      - `currentPlan`, and `currentPlanTiming` — each zoom's derived timing, `holdSeconds`,
+        `clicksCovered`, and how much it pans (`panWidthsPerSecond`, see Rhythm);
+      - the rules below as data (`constraints`), the tools, and the stills.
+    - `frame_N.jpg` — annotated stills: one per stretch across the *whole* runtime (thinned
+      evenly on long recordings), plus zoom openings and steps that fall elsewhere. Each has
+      a coordinate grid in video pixels, rings on the clicks within ±1.5 s (with times), a
+      blue dot for the cursor, and a green rectangle showing what the current plan's camera
+      sees at that moment. Look at all of them.
     - `plan.json` — the current plan, in the exact shape you write back. Overwrite it.
     - `./crisp` — your tools (run `./crisp help`):
       - `./crisp frame <seconds>` — another annotated still at any time (`--raw` for clean).
       - `./crisp preview <seconds>` — what the export will show at that time under your
         `plan.json`: the real zoomed crop, as the follower frames it, with cursor and
         ripples. This is how you check that a level shows enough (or little enough).
-      - `./crisp validate` — checks `plan.json` against the app's rules and prints the
-        derived timing of every zoom and step. The app runs the same checks on apply and
-        clamps anything you leave wrong, so finish only when it prints `OK`.
+      - `./crisp validate` — checks `plan.json` against the app's rules, prints the derived
+        timing of every zoom and step with how much each pans, and a `Rhythm:` line
+        against the targets below. The app runs the same checks on apply and clamps
+        anything you leave wrong, so finish only when it prints `OK`.
       - `./crisp path [from] [to]` — the camera over time under `plan.json`, as numbers
         (t, zoom, centre, speed): where the follower looks, when a still isn't enough.
 
@@ -558,6 +742,32 @@ enum AgentPlan {
     sparingly and only when the follower would genuinely miss the point; check them with
     `./crisp preview`.
 
+    ## Rhythm — how much zoom a video can carry
+
+    These are targets, not rules: the validator reports them but never enforces them. The
+    viewer notices every one of them.
+
+    - **Zoomed for at most about \(zoomedTarget)% of the runtime** (`summary.zoomedPercent`). Full
+      frame is the resting state; a zoom is an event.
+    - **A breath between zooms.** At least \(breath) s of full frame between one zoom's end and
+      the next one's start — unless the two are one continuous action, in which case they
+      are one zoom. Never more than three zooms back-to-back (`summary.longestRunOfZooms`).
+    - **At most one zoom per stretch**, and on a `busy` or `hectic` recording most stretches
+      get none. A stretch earns a zoom when it shows the viewer something they need to
+      *read*: a small control being used, a value being typed, a result appearing.
+      Navigating between places, scrolling, closing dialogs, idle or exploratory clicks:
+      full frame.
+    - **Never hold a shot the follower cannot keep.** Zooming on a `spread` stretch means
+      the camera pans the whole time. Zoom no tighter than the stretch's
+      `maxZoomWithoutPanning`, or leave it at full frame. Any zoom whose
+      `panWidthsPerSecond` is above \(churn) is chasing the cursor: loosen it, split it into two
+      stiller shots with full frame between, or drop it. `./crisp validate` flags these.
+    - **Holds of roughly 3–12 s.** Under a second only for punchy cuts the user asked for;
+      over about 15 s usually means two moments, or one that wanted full frame.
+
+    As a rule of thumb, a `hectic` three-minute recording arrives with 30–40 automatic
+    zooms; a polished plan for it has 6–12.
+
     ## The plan file
 
     ```json
@@ -583,19 +793,22 @@ enum AgentPlan {
 
     ## Workflow, every turn
 
-    1. Read `context.json`. Note the click clusters, which ones the current plan covers, the
-       drags (a drag is one continuous action — one zoom), and any user note.
-    2. Look at every `frame_N.jpg`. Identify what the user is doing at each moment and how
+    1. Read `context.json`: `summary` first, then `stretches`. Decide, stretch by stretch,
+       which ones earn a zoom and at what level (no tighter than `maxZoomWithoutPanning`),
+       and what the user note asks for. Note the drags (a drag is one continuous action —
+       one zoom, at a level that fits its whole extent).
+    2. Look at every `frame_N.jpg`. Identify what the user is doing in each stretch and how
        much of the screen it needs. Pull extra frames with `./crisp frame <t>` wherever the
-       story is unclear (between zooms, at uncovered clicks).
+       story is unclear.
     3. Write the polished plan to `plan.json`.
-    4. Run `./crisp validate`. Fix anything it reports and re-run until it prints `OK`.
+    4. Run `./crisp validate`. Fix anything it reports and re-run until it prints `OK`, and
+       read the `Rhythm:` line and the pan figures — bring anything over target back in.
     5. Run `./crisp preview <t>` at each hold opening (`start + 0.1`) and each step you
        changed, and look at the images. If the element is too small, zoom in more; if the
        viewer loses context, zoom out; if the wrong thing is framed, the timing is off.
     6. Reply to the user in 2–4 plain sentences: what you changed and why, in editorial
-       terms ("tightened the opening on the Save click", "merged the two form zooms"). No
-       JSON in the reply.
+       terms ("kept three zooms of the twenty-two, on the name field, the drag and the
+       result"; "tightened the opening on the Save click"). No JSON in the reply.
 
     On follow-up turns the files are refreshed to the user's current plan, which they may
     have hand-edited since your last reply — re-read `context.json` before changing anything,
@@ -603,17 +816,33 @@ enum AgentPlan {
 
     ## What "polished" means, in priority order
 
-    1. **Timing.** Every hold opens on the click it serves, never noticeably late; it ends
+    1. **Few enough zooms.** Within the rhythm targets above: the moments that show the
+       viewer something get a zoom, the rest play at full frame. On a calm recording that
+       may mean keeping most of the automatic plan; on a hectic one, a small fraction.
+    2. **Timing.** Every hold opens on the click it serves, never noticeably late; it ends
        when the action is done, not on a timer. Clusters that are one continuous action share
        one zoom.
-    2. **Fewer, better zooms.** Drop zooms on trivial or isolated clicks (closing a dialog,
-       an idle click) — emphasis means nothing if everything is emphasised. Keep the ones that
-       show the viewer something.
     3. **The right level.** Enough magnification that the control being used reads clearly,
-       enough context that the viewer knows where it lives. Check with `./crisp preview`.
-    4. **Few steps.** Step only when the action's scale genuinely changes mid-hold.
-    5. **Calm pacing.** Breathing room at full frame between bursts; no zoom shorter than
-       about a second unless the user asks for punchy cuts.
+       enough context that the viewer knows where it lives, and never tighter than the
+       stretch can hold still. Check with `./crisp preview`.
+    4. **A still camera.** No zoom that pans its way through a stretch; no more than three
+       zooms in a row; breathing room at full frame between bursts.
+    5. **Few steps.** Step only when the action's scale genuinely changes mid-hold.
+
+    ## A worked example
+
+    A three-minute `hectic` recording: 58 clicks, 22 stretches, and an automatic plan of 37
+    zooms zoomed for 71% of the runtime with a longest run of 9. The user creates a project:
+    a new-file dialog, a long spell of wandering through menus and side panels, typing a
+    name into a small field, dragging a panel wider, then browsing the results.
+
+    The polished plan kept 8 zooms. The name field — a `focused` stretch spanning 140×30 px
+    — got 2.2× from its first click until typing stopped, six seconds. The drag got 1.6×
+    over its whole extent (`maxZoomWithoutPanning` 1.7). The dialog, the first result and a
+    settings toggle each got one zoom of 4–8 s at 1.8×. Everything else went to full frame:
+    the menu wandering was a `spread` stretch whose zooms had panned at 0.9 widths/s, and
+    the dialog closes and idle clicks showed the viewer nothing. Zoomed share fell to 28%,
+    longest run to 2, and the reply said so in three sentences.
     """
     }
 }

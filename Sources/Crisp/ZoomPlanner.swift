@@ -24,6 +24,11 @@ struct ZoomPlanner {
         var zoomLevel: Double = 1.8
         /// Clicks closer than this (seconds) stay in one zoom segment.
         var clusterGap: Double = 2.5
+        /// Clusters closer than this (seconds) are one *stretch* of activity
+        /// for the agent's context: the unit an editor thinks in ("the form
+        /// filling", "the settings detour"), coarser than the auto plan's
+        /// one-zoom-per-cluster.
+        var stretchGap: Double = 7
         /// Lead time before the first click of a segment. The camera starts
         /// moving this early so it has ARRIVED by the time the click happens.
         var leadIn: Double = 0.8
@@ -115,20 +120,23 @@ struct ZoomPlanner {
     // MARK: - Automatic plan
 
     /// One action in the click log: clicks closer together than
-    /// `clusterGap`. The automatic plan gives each one a zoom; the agent's
-    /// context and stills list them.
+    /// `clusterGap` (or the `gap` given). The automatic plan gives each one
+    /// a zoom; the agent's context and stills list them. `bounds` is the
+    /// box the clicks span — how much screen the action covers.
     struct ClickCluster {
         var start: Double
         var end: Double
         var count: Int
         var center: CGPoint
+        var bounds: CGRect
     }
 
-    func clickClusters(_ events: [MouseEvent]) -> [ClickCluster] {
+    func clickClusters(_ events: [MouseEvent], gap: Double? = nil) -> [ClickCluster] {
+        let gap = gap ?? config.clusterGap
         var groups: [[MouseEvent]] = []
         var current: [MouseEvent] = []
         for click in events where click.kind == .leftDown || click.kind == .rightDown {
-            if let last = current.last, click.t - last.t > config.clusterGap {
+            if let last = current.last, click.t - last.t > gap {
                 groups.append(current)
                 current = []
             }
@@ -136,12 +144,44 @@ struct ZoomPlanner {
         }
         if !current.isEmpty { groups.append(current) }
         return groups.map { group in
-            ClickCluster(
+            let xs = group.map(\.x)
+            let ys = group.map(\.y)
+            return ClickCluster(
                 start: group[0].t, end: group[group.count - 1].t, count: group.count,
-                center: CGPoint(x: group.map(\.x).reduce(0, +) / Double(group.count),
-                                y: group.map(\.y).reduce(0, +) / Double(group.count))
+                center: CGPoint(x: xs.reduce(0, +) / Double(group.count), y: ys.reduce(0, +) / Double(group.count)),
+                bounds: CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
             )
         }
+    }
+
+    /// The tightest level at which `bounds` (plus a margin of `margin` of
+    /// the visible size on every side) fits the visible area — so a hold at
+    /// that level or looser shows every click without the follower panning.
+    /// nil when it does not fit even at the loosest level.
+    func maxZoomWithoutPanning(over bounds: CGRect, margin: Double = 0.2) -> Double? {
+        let usable = 1 - 2 * margin
+        let z = min(width * usable / max(bounds.width, 1), height * usable / max(bounds.height, 1))
+        guard z >= Self.zoomRange.lowerBound else { return nil }
+        return min(z, Self.zoomRange.upperBound)
+    }
+
+    /// How much the follower moves during a zoom's hold under `keys`: the
+    /// centre's total travel in visible widths (a width at the level in
+    /// effect), and that per second of hold. Around 0 is a still shot;
+    /// above `AgentPlan.panChurnLimit` the viewer sees the camera chasing.
+    func panTravel(for seg: ZoomSegment, keys: [Keyframe], duration: Double) -> (widths: Double, perSecond: Double) {
+        let span = motionSpan(for: seg, duration: duration)
+        guard span.end > span.arrive + 1e-6 else { return (0, 0) }
+        var travel = 0.0
+        var previous: Camera?
+        for key in keys where key.t >= span.arrive - 1e-6 && key.t <= span.end + 1e-6 {
+            if let p = previous {
+                let d = hypot(key.camera.center.x - p.center.x, key.camera.center.y - p.center.y)
+                travel += d / (width / max(key.camera.zoom, 1))
+            }
+            previous = key.camera
+        }
+        return (travel, travel / (span.end - span.arrive))
     }
 
     /// Auto-generate editable zoom segments from the click log: one per
